@@ -51,8 +51,10 @@ The dashboard includes:
 - A **Cinematic** button in the standard Stash navigation bar.
 - Hero billboard with a featured scene.
 - Horizontal rows for Library Spotlight, Forgotten Gems, Top Rated, Recently Watched, and Smart Suggestions.
+- **Random Picks** with six live random scenes pulled from the full Stash library.
 - Duplicate scan results from `duplicates_report.json`.
 - Hoverable scene cards with cover art, rating, tags, resolution, and direct scene links.
+- English-only dashboard labels and status messages.
 - Library Tools section with a guarded short-video cleanup action.
 - Title fallback logic that uses the Stash title first, then the scene file name if the title is empty or `Untitled`.
 
@@ -131,9 +133,11 @@ After the UI assets are loaded, a **Cinematic** button is inserted into the stan
 
 On the first Cinematic open in a browser profile, the UI automatically starts **Setup / Install Dependencies** once. Cinematic also includes a **Plugin Tasks** section for manually starting Setup, Dashboard Recommendations, and the Advanced Duplicate Scan.
 
-If `recommendations.json` is missing, the Cinematic UI temporarily falls back to live GraphQL scene data. Use **Recommendations neu suchen** to rebuild the local report when needed.
+If `recommendations.json` is missing, the Cinematic UI temporarily falls back to live GraphQL scene data. Use **Refresh Recommendations** to rebuild the local report when needed.
 
-The Cinematic header also shows the total number of videos currently known to Stash and a rough estimate for how long recommendation generation should take. This count is refreshed live through GraphQL, so it is not limited to the 50-item recommendation rows. The **Recommendations neu suchen** button rebuilds `recommendations.json`, which is useful after removing scenes from Stash.
+The Cinematic header also shows the total number of videos currently known to Stash and a rough estimate for how long recommendation generation should take. This count is refreshed live through GraphQL, so it is not limited to the 50-item recommendation rows. The **Refresh Recommendations** button rebuilds `recommendations.json`, which is useful after removing scenes from Stash.
+
+The recommendation rows intentionally show curated slices, while **Random Picks** fetches six random scenes from the full Stash library. The **Refresh Picks** button pulls a new random set without rebuilding `recommendations.json`.
 
 Duplicate scan results are shown in the **Duplicate Results** section. The section reads `duplicates_report.json`, displays the latest scan metadata, and lists suspected duplicate pairs with confidence, average distance, compared samples, scene titles, paths, and direct Stash scene links.
 
