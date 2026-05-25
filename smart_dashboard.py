@@ -1390,7 +1390,7 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
                 recommendation_item(
                     scene,
                     score,
-                    f"Rating {rating}/5 und seit {last_days} Tagen nicht gesehen",
+                    f"Rating {rating}/5 and not watched for {last_days} days",
                     stash_base_url,
                 )
             )
@@ -1426,8 +1426,8 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
         if matched_studio:
             reasons.append("Studio: " + matched_studio)
         if unplayed_bonus:
-            reasons.append("noch nicht angesehen")
-        reason = "; ".join(reasons) if reasons else f"Hohe Bewertung ({rating}/5)"
+            reasons.append("not watched yet")
+        reason = "; ".join(reasons) if reasons else f"High rating ({rating}/5)"
         smart_suggestions.append(recommendation_item(scene, final_score, reason, stash_base_url))
 
     smart_suggestions.sort(key=lambda item: item["score"], reverse=True)
@@ -1471,7 +1471,7 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
         studio = studio_name(scene)
         if studio:
             reasons.append(studio)
-        reason = "; ".join(reasons) if reasons else "Aus deiner Stash-Bibliothek"
+        reason = "; ".join(reasons) if reasons else "From your Stash library"
         library_spotlight.append(recommendation_item(scene, score, reason, stash_base_url))
     library_spotlight.sort(key=lambda item: item["score"], reverse=True)
 

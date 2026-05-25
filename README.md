@@ -131,7 +131,7 @@ After the UI assets are loaded, a **Cinematic** button is inserted into the stan
 
 On the first Cinematic open in a browser profile, the UI automatically starts **Setup / Install Dependencies** once. Cinematic also includes a **Plugin Tasks** section for manually starting Setup, Dashboard Recommendations, and the Advanced Duplicate Scan.
 
-If `recommendations.json` is missing, the Cinematic UI automatically starts **Update Dashboard Recommendations** once per browser session and temporarily falls back to live GraphQL scene data.
+If `recommendations.json` is missing, the Cinematic UI temporarily falls back to live GraphQL scene data. Use **Recommendations neu suchen** to rebuild the local report when needed.
 
 The Cinematic header also shows the total number of videos currently known to Stash and a rough estimate for how long recommendation generation should take. This count is refreshed live through GraphQL, so it is not limited to the 50-item recommendation rows. The **Recommendations neu suchen** button rebuilds `recommendations.json`, which is useful after removing scenes from Stash.
 

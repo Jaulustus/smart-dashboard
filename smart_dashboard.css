@@ -431,14 +431,43 @@
   text-transform: uppercase;
 }
 
+.sd-row-action-button {
+  min-height: 2.5rem;
+  padding: 0 1rem;
+  color: #fff;
+  background: linear-gradient(135deg, rgba(142, 68, 173, 0.98), rgba(62, 17, 84, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.7rem;
+  box-shadow: 0 0.8rem 2rem rgba(0, 0, 0, 0.24);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 950;
+  transition: transform 160ms ease, filter 160ms ease;
+  white-space: nowrap;
+}
+
+.sd-row-action-button:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
 .sd-rail-wrap {
   position: relative;
+  display: grid;
+  grid-template-columns: 2.85rem minmax(0, 1fr) 2.85rem;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
 }
 
 .sd-rail {
+  grid-column: 1 / -1;
+  grid-row: 1;
   display: flex;
   gap: 1rem;
   padding: 1rem 3.25rem 2rem;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: visible;
   scroll-behavior: smooth;
@@ -450,43 +479,70 @@
   display: none;
 }
 
+.sd-random-picks {
+  margin: -0.5rem 0 0;
+  padding: 0 clamp(1.25rem, 4vw, 4rem);
+}
+
+.sd-random-picks .sd-row-header {
+  justify-content: flex-start;
+}
+
+.sd-random-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.sd-random-rail {
+  display: flex;
+  gap: 1rem;
+  padding: 1rem 3.25rem 2rem;
+  overflow: visible;
+  scroll-padding: 0;
+}
+
+.sd-random-rail .sd-scene-card {
+  flex: 0 0 19.5rem;
+}
+
 .sd-rail-arrow {
-  position: absolute;
-  top: calc(50% - 0.5rem);
+  position: relative;
+  grid-row: 1;
   z-index: 25;
   display: grid;
-  width: 2.85rem;
-  height: 4.75rem;
+  width: 2.35rem;
+  height: 5.6rem;
   place-items: center;
   color: #fff;
-  background:
-    radial-gradient(circle at center, rgba(142, 68, 173, 0.54), rgba(0, 0, 0, 0.62)),
-    rgba(8, 8, 10, 0.86);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
-  box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.45);
+  background: rgba(8, 8, 10, 0.42);
+  border: 0;
+  border-radius: 0.35rem;
+  box-shadow: none;
   cursor: pointer;
   font: inherit;
-  font-size: 2.45rem;
-  font-weight: 800;
+  font-size: 2.2rem;
+  font-weight: 700;
   line-height: 1;
-  transform: translateY(-50%);
-  transition: background 160ms ease, opacity 160ms ease, transform 160ms ease;
+  opacity: 0.72;
+  transform: none;
+  transition: background 160ms ease, opacity 160ms ease;
 }
 
 .sd-rail-arrow:hover {
-  background:
-    radial-gradient(circle at center, rgba(142, 68, 173, 0.82), rgba(0, 0, 0, 0.68)),
-    rgba(8, 8, 10, 0.94);
-  transform: translateY(-50%) scale(1.05);
+  background: rgba(8, 8, 10, 0.68);
+  opacity: 1;
 }
 
 .sd-rail-arrow-left {
-  left: 0.15rem;
+  grid-column: 1;
+  justify-self: start;
 }
 
 .sd-rail-arrow-right {
-  right: 0.15rem;
+  grid-column: 3;
+  justify-self: end;
 }
 
 .sd-scene-card {
@@ -1087,6 +1143,15 @@
   .sd-rail {
     padding-right: 2.8rem;
     padding-left: 2.8rem;
+  }
+
+  .sd-random-rail {
+    padding-right: 2.8rem;
+    padding-left: 2.8rem;
+  }
+
+  .sd-random-rail .sd-scene-card {
+    flex-basis: 16.5rem;
   }
 
   .sd-rail-arrow {

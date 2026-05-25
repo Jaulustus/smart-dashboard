@@ -1,6 +1,6 @@
 name: "Smart Dashboard & Advanced Duplicate Finder"
 description: "AI-powered duplicate finder (pHash) and local recommendation engine for the dashboard."
-version: "0.1.2"
+version: "0.2.0"
 url: "https://github.com/Jaulustus/smart-dashboard"
 
 exec:
