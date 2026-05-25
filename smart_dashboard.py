@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import traceback
 from collections import Counter
@@ -26,6 +27,8 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 CACHE_DB = PLUGIN_DIR / "cache.db"
 DUPLICATES_REPORT = PLUGIN_DIR / "duplicates_report.json"
 RECOMMENDATIONS_REPORT = PLUGIN_DIR / "recommendations.json"
+REQUIREMENTS_FILE = PLUGIN_DIR / "requirements.txt"
+DASHBOARD_DEEP_LINK = "/?smart_dashboard=cinematic"
 
 HASH_SIZE = 8
 PHASH_BITS = HASH_SIZE * HASH_SIZE
@@ -34,6 +37,12 @@ MIN_HASH_SAMPLES = 3
 DUPLICATE_CONFIDENCE_THRESHOLD = 0.90
 RECENT_WATCH_DAYS = 90
 FORGOTTEN_DAYS = 180
+REQUIRED_DEPENDENCIES: Sequence[Tuple[str, str]] = (
+    ("requests", "requests"),
+    ("cv2", "opencv-python"),
+    ("numpy", "numpy"),
+    ("imagehash", "imagehash"),
+)
 
 
 class SmartDashboardError(Exception):
@@ -69,6 +78,26 @@ def log(message: str) -> None:
     print(f"[{PLUGIN_NAME}] {message}", file=sys.stderr, flush=True)
 
 
+def ensure_runtime_dependencies() -> None:
+    try:
+        import requests  # type: ignore # noqa: F401
+        import cv2  # type: ignore # noqa: F401
+        import numpy  # type: ignore # noqa: F401
+        import imagehash  # type: ignore # noqa: F401
+    except ImportError as exc:
+        missing_module = getattr(exc, "name", None) or str(exc)
+        matching_package = next(
+            (package for module, package in REQUIRED_DEPENDENCIES if module == missing_module),
+            missing_module,
+        )
+        log(
+            "Eine benoetigte Python-Abhaengigkeit fehlt "
+            f"({matching_package}). Bitte starte zuerst den Task "
+            "'Setup / Install Dependencies' in der Stash UI."
+        )
+        sys.exit(1)
+
+
 def utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -83,6 +112,50 @@ def write_json_file(path: Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=False)
         handle.write("\n")
     tmp_path.replace(path)
+
+
+def run_setup_dependencies() -> Dict[str, Any]:
+    if not REQUIREMENTS_FILE.exists():
+        raise SmartDashboardError(f"requirements.txt nicht gefunden: {REQUIREMENTS_FILE}")
+
+    command = [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)]
+    log("Starte Installation der Python-Abhaengigkeiten.")
+    log("Befehl: " + " ".join(command))
+
+    process = subprocess.Popen(
+        command,
+        cwd=str(PLUGIN_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    if process.stdout is not None:
+        for line in process.stdout:
+            print(line.rstrip(), file=sys.stderr, flush=True)
+
+    exit_code = process.wait()
+    if exit_code != 0:
+        raise SmartDashboardError(f"Dependency-Installation fehlgeschlagen (Exit-Code {exit_code}).")
+
+    log("Python-Abhaengigkeiten erfolgreich installiert.")
+    return {
+        "message": "Setup abgeschlossen: Python-Abhaengigkeiten wurden installiert.",
+        "requirements_path": str(REQUIREMENTS_FILE),
+    }
+
+
+def run_open_dashboard(payload: Dict[str, Any]) -> Dict[str, Any]:
+    stash_base_url = stash_base_url_from_graphql_url(get_graphql_url(payload))
+    dashboard_url = f"{stash_base_url.rstrip('/')}{DASHBOARD_DEEP_LINK}"
+    return {
+        "message": (
+            f"Dashboard: {dashboard_url} | "
+            "Falls noch keine Daten angezeigt werden, starte zuerst 'Update Dashboard Recommendations'."
+        ),
+        "dashboard_url": dashboard_url,
+    }
 
 
 def read_stash_payload() -> Dict[str, Any]:
@@ -134,8 +207,17 @@ def deep_find(value: Any, keys: Sequence[str]) -> Optional[Any]:
     return None
 
 
+def normalize_client_host(host: Any) -> str:
+    text = str(host).strip() if host not in (None, "") else "localhost"
+    return "localhost" if text == "0.0.0.0" else text
+
+
+def normalize_client_url(url: str) -> str:
+    return url.replace("://0.0.0.0", "://localhost")
+
+
 def detect_task(argv: Sequence[str], payload: Dict[str, Any]) -> Optional[str]:
-    known_tasks = {"smart_dup_scan", "smart_dash_calc"}
+    known_tasks = {"setup", "smart_dup_scan", "smart_dash_calc", "open_dashboard", "cleanup_short"}
 
     for arg in argv:
         cleaned = arg.strip()
@@ -149,9 +231,13 @@ def detect_task(argv: Sequence[str], payload: Dict[str, Any]) -> Optional[str]:
     if env_task in known_tasks:
         return env_task
 
+    args = get_args_payload(payload)
+    if first_present(args, ["max_duration_seconds", "maxDurationSeconds", "duration", "seconds", "threshold"]):
+        return "cleanup_short"
+
     candidates = [
         deep_find(payload, ["hookContext", "hook_context"]),
-        deep_find(payload, ["id", "hook", "hook_id", "hookID", "task", "task_id", "taskID", "name"]),
+        deep_find(payload, ["id", "hook", "hook_id", "hookID", "task", "mode", "action", "task_id", "taskID", "name"]),
     ]
     for candidate in candidates:
         if isinstance(candidate, dict):
@@ -173,17 +259,18 @@ def get_graphql_url(payload: Dict[str, Any]) -> str:
         or deep_find(payload, ["graphql_url", "graphqlUrl", "endpoint"])
     )
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+        return normalize_client_url(explicit.strip())
 
     base_url = os.environ.get("STASH_URL") or deep_find(payload, ["url", "stash_url", "stashUrl"])
     if isinstance(base_url, str) and base_url.strip():
         base_url = base_url.strip().rstrip("/")
-        return base_url if base_url.endswith("/graphql") else f"{base_url}/graphql"
+        graphql_url = base_url if base_url.endswith("/graphql") else f"{base_url}/graphql"
+        return normalize_client_url(graphql_url)
 
     server_connection = deep_find(payload, ["server_connection", "serverConnection"])
     if isinstance(server_connection, dict):
         scheme = first_present(server_connection, ["Scheme", "scheme"]) or "http"
-        host = first_present(server_connection, ["Host", "host"]) or "localhost"
+        host = normalize_client_host(first_present(server_connection, ["Host", "host"]))
         port = first_present(server_connection, ["Port", "port"]) or 9999
         return f"{scheme}://{host}:{port}/graphql"
 
@@ -303,7 +390,86 @@ DUP_QUERY_VARIANTS: Sequence[Tuple[str, str]] = (
     ),
 )
 
+CLEANUP_QUERY_VARIANTS: Sequence[Tuple[str, str]] = (
+    (
+        "files_with_duration",
+        """
+        query SmartDashboardCleanupScenes($filter: FindFilterType!) {
+          findScenes(filter: $filter) {
+            count
+            scenes {
+              id
+              title
+              files { path duration }
+            }
+          }
+        }
+        """,
+    ),
+    (
+        "legacy_file_duration",
+        """
+        query SmartDashboardCleanupScenes($filter: FindFilterType!) {
+          findScenes(filter: $filter) {
+            count
+            scenes {
+              id
+              title
+              file { path duration }
+            }
+          }
+        }
+        """,
+    ),
+)
+
 DASH_QUERY_VARIANTS: Sequence[Tuple[str, str]] = (
+    (
+        "rating100_ui_full",
+        """
+        query SmartDashboardRecommendationScenes($filter: FindFilterType!) {
+          findScenes(filter: $filter) {
+            count
+            scenes {
+              id
+              title
+              rating100
+              play_count
+              resume_time
+              last_played_at
+              paths { screenshot }
+              files { path duration width height }
+              tags { id name }
+              performers { id name }
+              studio { id name }
+            }
+          }
+        }
+        """,
+    ),
+    (
+        "rating_ui_full",
+        """
+        query SmartDashboardRecommendationScenes($filter: FindFilterType!) {
+          findScenes(filter: $filter) {
+            count
+            scenes {
+              id
+              title
+              rating
+              play_count
+              resume_time
+              last_played_at
+              paths { screenshot }
+              files { path duration width height }
+              tags { id name }
+              performers { id name }
+              studio { id name }
+            }
+          }
+        }
+        """,
+    ),
     (
         "rating100_full",
         """
@@ -427,6 +593,70 @@ def safe_float(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def parse_duration_seconds(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if ":" not in text:
+        return safe_float(text)
+
+    parts = text.split(":")
+    if len(parts) not in (2, 3):
+        return None
+
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError:
+        return None
+
+    if any(part < 0 for part in numbers):
+        return None
+
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        return minutes * 60 + seconds
+
+    hours, minutes, seconds = numbers
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def get_args_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    args = payload.get("args")
+    return args if isinstance(args, dict) else {}
+
+
+def get_cleanup_max_duration(argv: Sequence[str], payload: Dict[str, Any]) -> float:
+    raw_value: Optional[Any] = None
+    if len(argv) >= 2:
+        raw_value = argv[1]
+
+    args = get_args_payload(payload)
+    if raw_value in (None, ""):
+        raw_value = first_present(
+            args,
+            [
+                "max_duration_seconds",
+                "maxDurationSeconds",
+                "duration",
+                "seconds",
+                "threshold",
+            ],
+        )
+
+    max_duration = parse_duration_seconds(raw_value)
+    if max_duration is None or max_duration <= 0:
+        raise SmartDashboardError(
+            "cleanup_short benoetigt eine gueltige Dauer groesser 0 Sekunden. "
+            "Nutze das Dashboard-Feld 'Videos kuerzer als (Minuten:Sekunden) loeschen'."
+        )
+
+    return max_duration
 
 
 def parse_scene_file(scene: Dict[str, Any]) -> Optional[SceneFile]:
@@ -761,6 +991,155 @@ def run_duplicate_scan(client: GraphQLClient) -> Dict[str, Any]:
     }
 
 
+def destroy_scene_record_only(client: GraphQLClient, scene_id: str) -> bool:
+    full_mutation = """
+    mutation SmartDashboardDestroyScene($input: SceneDestroyInput!) {
+      sceneDestroy(input: $input)
+    }
+    """
+    input_payload = {
+        "id": scene_id,
+        "delete_file": False,
+        "delete_generated": True,
+        "destroy_file_entry": False,
+    }
+
+    try:
+        data = client.execute(full_mutation, {"input": input_payload})
+    except GraphQLClientError as exc:
+        if "destroy_file_entry" not in str(exc):
+            raise
+        legacy_input = {
+            "id": scene_id,
+            "delete_file": False,
+            "delete_generated": True,
+        }
+        data = client.execute(full_mutation, {"input": legacy_input})
+
+    return bool(data.get("sceneDestroy"))
+
+
+def video_duration_from_file(path: Optional[str]) -> Optional[float]:
+    if not path or not Path(path).exists():
+        return None
+
+    try:
+        cv2, _np = ensure_video_dependencies()
+    except SmartDashboardError as exc:
+        log(f"Kann Dauer nicht aus Datei lesen, Video-Abhaengigkeit fehlt: {exc}")
+        return None
+
+    capture = cv2.VideoCapture(path)
+    if not capture.isOpened():
+        return None
+
+    try:
+        fps = safe_float(capture.get(cv2.CAP_PROP_FPS)) or 0.0
+        frame_count = safe_float(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0.0
+        if fps > 0 and frame_count > 0:
+            return frame_count / fps
+        return None
+    finally:
+        capture.release()
+
+
+def remove_deleted_scenes_from_recommendations(deleted_scene_ids: Sequence[str]) -> int:
+    if not deleted_scene_ids or not RECOMMENDATIONS_REPORT.exists():
+        return 0
+
+    deleted = set(str(scene_id) for scene_id in deleted_scene_ids)
+    try:
+        with RECOMMENDATIONS_REPORT.open("r", encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"recommendations.json konnte nach Cleanup nicht bereinigt werden: {exc}")
+        return 0
+
+    if not isinstance(report, dict):
+        return 0
+
+    removed = 0
+    for key in ("forgotten_gems", "smart_suggestions", "top_rated", "recently_watched", "library_spotlight"):
+        items = report.get(key)
+        if not isinstance(items, list):
+            continue
+        kept = [item for item in items if not (isinstance(item, dict) and str(item.get("id")) in deleted)]
+        removed += len(items) - len(kept)
+        report[key] = kept
+
+    if removed:
+        report["generated_at"] = iso_now()
+        report["cleanup_note"] = {
+            "removed_deleted_scene_ids": sorted(deleted),
+            "updated_at": iso_now(),
+        }
+        write_json_file(RECOMMENDATIONS_REPORT, report)
+        log(f"recommendations.json bereinigt: {removed} Eintraege entfernt.")
+
+    return removed
+
+
+def run_cleanup_short(client: GraphQLClient, max_duration_seconds: float) -> Dict[str, Any]:
+    scenes, query_variant = fetch_scenes_with_variants(client, CLEANUP_QUERY_VARIANTS)
+    candidates: List[Tuple[str, str, Optional[str], float]] = []
+    missing_duration = 0
+    file_duration_fallbacks = 0
+
+    for scene in scenes:
+        scene_id = str(scene.get("id", "")).strip()
+        title = str(scene.get("title") or scene_id or "Untitled")
+        scene_file = parse_scene_file(scene)
+        duration = safe_float(scene_file.duration if scene_file else scene.get("duration"))
+        if duration is None and scene_file:
+            duration = video_duration_from_file(scene_file.path)
+            if duration is not None:
+                file_duration_fallbacks += 1
+        if not scene_id or duration is None:
+            missing_duration += 1
+            continue
+        if duration < max_duration_seconds:
+            candidates.append((scene_id, title, scene_file.path if scene_file else None, duration))
+
+    log(
+        "Short-Video-Cleanup: "
+        f"{len(candidates)} Szenen unter {max_duration_seconds:g}s gefunden "
+        f"(Query-Variante: {query_variant}, "
+        f"{file_duration_fallbacks} Datei-Dauer-Fallbacks, "
+        f"{missing_duration} ohne Dauer)."
+    )
+
+    deleted = 0
+    deleted_scene_ids: List[str] = []
+    failed: List[Dict[str, str]] = []
+    for scene_id, title, path, duration in candidates:
+        log(f"Entferne kurze Szene aus Stash: {scene_id} | {duration:.2f}s | {title} | {path or 'kein Pfad'}")
+        try:
+            if destroy_scene_record_only(client, scene_id):
+                deleted += 1
+                deleted_scene_ids.append(scene_id)
+            else:
+                failed.append({"scene_id": scene_id, "title": title, "reason": "sceneDestroy gab false zurueck"})
+        except Exception as exc:
+            failed.append({"scene_id": scene_id, "title": title, "reason": str(exc)})
+            log(f"Fehler beim Loeschen von Szene {scene_id}: {exc}")
+
+    removed_recommendation_items = remove_deleted_scenes_from_recommendations(deleted_scene_ids)
+
+    return {
+        "message": (
+            f"Short-Video-Cleanup abgeschlossen: {deleted}/{len(candidates)} Szenen "
+            f"unter {max_duration_seconds:g}s aus Stash entfernt. Dateien wurden nicht geloescht."
+        ),
+        "max_duration_seconds": max_duration_seconds,
+        "matched_scenes": len(candidates),
+        "deleted_scenes": deleted,
+        "file_duration_fallbacks": file_duration_fallbacks,
+        "missing_duration": missing_duration,
+        "removed_recommendation_items": removed_recommendation_items,
+        "failed_scenes": failed,
+    }
+
+
 def parse_datetime(value: Any) -> Optional[dt.datetime]:
     if value in (None, ""):
         return None
@@ -839,11 +1218,99 @@ def play_count(scene: Dict[str, Any]) -> int:
     return safe_int(scene.get("play_count")) or 0
 
 
-def recommendation_item(scene: Dict[str, Any], score: float, reason: str) -> Dict[str, Any]:
+def stash_base_url_from_graphql_url(graphql_url: str) -> str:
+    cleaned = graphql_url.strip().rstrip("/")
+    if cleaned.endswith("/graphql"):
+        return cleaned[: -len("/graphql")]
+    return cleaned or "http://localhost:9999"
+
+
+def absolute_stash_asset_url(value: Optional[str], stash_base_url: str) -> Optional[str]:
+    if not value:
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith(("http://", "https://", "file://", "data:")):
+        return text
+    if text.startswith("/"):
+        return f"{stash_base_url.rstrip('/')}{text}"
+    return f"{stash_base_url.rstrip('/')}/{text.lstrip('/')}"
+
+
+def scene_cover_path(scene: Dict[str, Any], stash_base_url: str) -> Optional[str]:
+    paths = scene.get("paths")
+    if isinstance(paths, dict):
+        value = paths.get("screenshot")
+        if isinstance(value, str):
+            return absolute_stash_asset_url(value, stash_base_url)
+    return None
+
+
+def scene_resolution(scene: Dict[str, Any]) -> Optional[str]:
+    file_candidates: List[Any] = []
+    files = scene.get("files")
+    if isinstance(files, list):
+        file_candidates.extend(files)
+    if isinstance(scene.get("file"), dict):
+        file_candidates.append(scene["file"])
+    file_candidates.append(scene)
+
+    for file_obj in file_candidates:
+        if not isinstance(file_obj, dict):
+            continue
+        width = safe_int(file_obj.get("width"))
+        height = safe_int(file_obj.get("height"))
+        if width and height:
+            return f"{width}x{height}"
+    return None
+
+
+def scene_primary_file_path(scene: Dict[str, Any]) -> Optional[str]:
+    scene_file = parse_scene_file(scene)
+    return scene_file.path if scene_file else None
+
+
+def scene_file_name(scene: Dict[str, Any]) -> Optional[str]:
+    path = scene_primary_file_path(scene)
+    if not path:
+        return None
+    return Path(path).name
+
+
+def scene_display_title(scene: Dict[str, Any]) -> str:
+    title = scene.get("title")
+    if isinstance(title, str) and title.strip() and title.strip().lower() != "untitled":
+        return title.strip()
+
+    file_name = scene_file_name(scene)
+    if file_name:
+        return Path(file_name).stem or file_name
+
+    scene_id = str(scene.get("id", "")).strip()
+    return f"Scene {scene_id}" if scene_id else "Untitled"
+
+
+def recommendation_item(
+    scene: Dict[str, Any],
+    score: float,
+    reason: str,
+    stash_base_url: str,
+) -> Dict[str, Any]:
+    scene_id = str(scene.get("id"))
+    cover_path = scene_cover_path(scene, stash_base_url)
+    file_path = scene_primary_file_path(scene)
     return {
-        "id": str(scene.get("id")),
-        "title": scene.get("title") or "Untitled",
+        "id": scene_id,
+        "title": scene_display_title(scene),
+        "stash_title": scene.get("title"),
+        "file_name": Path(file_path).name if file_path else None,
+        "file_path": file_path,
+        "cover_path": cover_path,
+        "thumbnail": cover_path,
         "rating": normalize_rating(scene),
+        "resolution": scene_resolution(scene),
         "score": round(score, 4),
         "reason": reason,
         "play_count": play_count(scene),
@@ -853,6 +1320,7 @@ def recommendation_item(scene: Dict[str, Any], score: float, reason: str) -> Dic
         "tags": entity_names(scene.get("tags")),
         "performers": entity_names(scene.get("performers")),
         "studio": studio_name(scene),
+        "stash_url": f"{stash_base_url.rstrip('/')}/scenes/{scene_id}",
     }
 
 
@@ -893,6 +1361,7 @@ def build_preference_counters(scenes: Sequence[Dict[str, Any]]) -> Tuple[Counter
 
 def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
     scenes, query_variant = fetch_scenes_with_variants(client, DASH_QUERY_VARIANTS)
+    stash_base_url = stash_base_url_from_graphql_url(client.url)
     tag_scores, studio_scores = build_preference_counters(scenes)
 
     forgotten_gems: List[Dict[str, Any]] = []
@@ -902,7 +1371,12 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
         if rating is not None and rating >= 4.0 and last_days is not None and last_days > FORGOTTEN_DAYS:
             score = rating + min(last_days / 365.0, 3.0) + min(play_count(scene), 10) * 0.05
             forgotten_gems.append(
-                recommendation_item(scene, score, f"Rating {rating}/5 und seit {last_days} Tagen nicht gesehen")
+                recommendation_item(
+                    scene,
+                    score,
+                    f"Rating {rating}/5 und seit {last_days} Tagen nicht gesehen",
+                    stash_base_url,
+                )
             )
 
     forgotten_gems.sort(key=lambda item: item["score"], reverse=True)
@@ -938,15 +1412,64 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
         if unplayed_bonus:
             reasons.append("noch nicht angesehen")
         reason = "; ".join(reasons) if reasons else f"Hohe Bewertung ({rating}/5)"
-        smart_suggestions.append(recommendation_item(scene, final_score, reason))
+        smart_suggestions.append(recommendation_item(scene, final_score, reason, stash_base_url))
 
     smart_suggestions.sort(key=lambda item: item["score"], reverse=True)
+
+    top_rated: List[Dict[str, Any]] = []
+    for scene in scenes:
+        rating = normalize_rating(scene)
+        if rating is None:
+            continue
+        score = rating + min(play_count(scene), 25) * 0.02
+        top_rated.append(recommendation_item(scene, score, f"Top rated: {rating}/5", stash_base_url))
+    top_rated.sort(key=lambda item: (item["rating"] or 0, item["score"]), reverse=True)
+
+    recently_watched_scenes = [
+        scene for scene in scenes if parse_datetime(scene.get("last_played_at")) is not None
+    ]
+    recently_watched_scenes.sort(
+        key=lambda scene: parse_datetime(scene.get("last_played_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+        reverse=True,
+    )
+    recently_watched = [
+        recommendation_item(
+            scene,
+            float(max(0, 365 - (days_since(scene.get("last_played_at")) or 365))),
+            "Recently watched",
+            stash_base_url,
+        )
+        for scene in recently_watched_scenes[:50]
+    ]
+
+    library_spotlight: List[Dict[str, Any]] = []
+    for index, scene in enumerate(scenes):
+        rating = normalize_rating(scene) or 0.0
+        plays = play_count(scene)
+        score = rating + min(plays, 25) * 0.05 + max(0.0, 1.0 - index / max(len(scenes), 1))
+        reasons: List[str] = []
+        if rating:
+            reasons.append(f"Rating {rating}/5")
+        if plays:
+            reasons.append(f"{plays} plays")
+        studio = studio_name(scene)
+        if studio:
+            reasons.append(studio)
+        reason = "; ".join(reasons) if reasons else "Aus deiner Stash-Bibliothek"
+        library_spotlight.append(recommendation_item(scene, score, reason, stash_base_url))
+    library_spotlight.sort(key=lambda item: item["score"], reverse=True)
+
+    if not top_rated:
+        top_rated = library_spotlight[:50]
+    if not smart_suggestions:
+        smart_suggestions = library_spotlight[:50]
 
     report = {
         "plugin": PLUGIN_NAME,
         "author": AUTHOR,
         "generated_at": iso_now(),
         "graphql_query_variant": query_variant,
+        "stash_base_url": stash_base_url,
         "parameters": {
             "forgotten_days": FORGOTTEN_DAYS,
             "recent_watch_days": RECENT_WATCH_DAYS,
@@ -961,6 +1484,9 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
         },
         "forgotten_gems": forgotten_gems[:50],
         "smart_suggestions": smart_suggestions[:50],
+        "top_rated": top_rated[:50],
+        "recently_watched": recently_watched,
+        "library_spotlight": library_spotlight[:50],
     }
     write_json_file(RECOMMENDATIONS_REPORT, report)
 
@@ -1007,17 +1533,25 @@ def main() -> None:
             response = {
                 "output": (
                     "Smart Dashboard Plugin bereit. Bekannte Tasks: "
-                    "smart_dup_scan, smart_dash_calc."
+                    "setup, smart_dup_scan, smart_dash_calc, open_dashboard, cleanup_short."
                 ),
                 "plugin": PLUGIN_NAME,
                 "author": AUTHOR,
             }
+        elif task == "setup":
+            response = success_response(run_setup_dependencies())
+        elif task == "open_dashboard":
+            response = success_response(run_open_dashboard(payload))
         else:
+            ensure_runtime_dependencies()
             client = make_client(payload)
             if task == "smart_dup_scan":
                 response = success_response(run_duplicate_scan(client))
             elif task == "smart_dash_calc":
                 response = success_response(run_dashboard_calc(client))
+            elif task == "cleanup_short":
+                max_duration = get_cleanup_max_duration(sys.argv[1:], payload)
+                response = success_response(run_cleanup_short(client, max_duration))
             else:
                 raise SmartDashboardError(f"Unbekannter Task: {task}")
     except SmartDashboardError as exc:

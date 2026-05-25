@@ -11,6 +11,8 @@ Smart Dashboard & Advanced Duplicate Finder adds two local automation tasks to S
 
 - **Advanced Duplicate Scan** analyzes video files with perceptual hashing to detect visually similar scenes, even when resolution, bitrate, or compression differ.
 - **Dashboard Recommendations** analyzes local watch history through the Stash GraphQL API and generates recommendation data for forgotten favorites and smart suggestions.
+- **Stash Cinematic UI** adds a native React-powered dashboard route directly inside the Stash web interface.
+- **Short-Video Cleanup** lets users enter a duration in the dashboard and remove matching scene records from Stash while keeping the original files on disk.
 
 The plugin runs locally, communicates with the local Stash GraphQL API, and writes generated reports directly into the plugin directory.
 
@@ -36,8 +38,22 @@ Generated recommendation groups include:
 
 - **Forgotten Gems:** highly rated scenes that have not been watched recently.
 - **Smart Suggestions:** scenes matched against local viewing preferences such as tags, studios, ratings, and play history.
+- **Library Spotlight:** fallback recommendations from the local scene library when ratings or watch history are sparse.
 
 The generated output is written to `recommendations.json`.
+
+### Native Stash Cinematic UI
+
+The plugin registers `smart_dashboard.js` and `smart_dashboard.css` as native Stash UI assets. The frontend reads `recommendations.json` through Stash's plugin asset endpoint and renders a cinematic dashboard directly inside the Stash React application.
+
+The dashboard includes:
+
+- A **Cinematic** button in the standard Stash navigation bar.
+- Hero billboard with a featured scene.
+- Horizontal rows for Library Spotlight, Forgotten Gems, Top Rated, Recently Watched, and Smart Suggestions.
+- Hoverable scene cards with cover art, rating, tags, resolution, and direct scene links.
+- Library Tools section with a guarded short-video cleanup action.
+- Title fallback logic that uses the Stash title first, then the scene file name if the title is empty or `Untitled`.
 
 ## Tech Stack
 
@@ -46,6 +62,7 @@ The generated output is written to `recommendations.json`.
 - `requests`
 - `opencv-python`
 - `numpy`
+- JavaScript/CSS Stash UI plugin assets
 - SQLite
 
 ## Prerequisites
@@ -67,17 +84,31 @@ Before using the plugin, make sure:
    plugins/local/smart-dashboard
    ```
 
-2. Install the required Python packages.
+2. Open the Stash settings UI and click **Reload Plugins**.
+
+3. Run the **Setup / Install Dependencies** task from the Stash **Tasks** menu.
+
+   This installs the required Python packages using `requirements.txt`.
+
+   For manual installation outside the Stash UI, run:
 
    ```bash
-   pip install requests opencv-python numpy
+   pip install -r requirements.txt
    ```
 
    If Stash uses a specific Python executable or virtual environment, install the packages into that same environment.
 
-3. Open the Stash settings UI and click **Reload Plugins**.
-
 4. Confirm that **Smart Dashboard & Advanced Duplicate Finder** appears in the Stash plugins list.
+
+## Stash Plugin Manifest
+
+The plugin manifest is `smart_dashboard.yml`. Stash uses a strict YAML schema for plugin manifests, so unsupported top-level fields such as `id` or `author` must not be added to the file.
+
+The plugin ID is derived from the manifest filename. Because the file is named `smart_dashboard.yml`, the internal Stash plugin ID is:
+
+```text
+smart_dashboard
+```
 
 ## Usage
 
@@ -85,12 +116,26 @@ The plugin exposes its functionality through the native Stash **Tasks** menu.
 
 Available tasks:
 
+- **Setup / Install Dependencies**
+- **Open Dashboard**
 - **Start Advanced Duplicate Scan / Erweiterte Duplikatsuche starten**
 - **Update Dashboard Recommendations / Dashboard-Empfehlungen aktualisieren**
 
 When a task is started, Stash runs the plugin backend script directly and passes the selected task argument to it.
 
 The plugin writes live progress and diagnostic output to the native Stash log window through `stderr`, keeping the task result output compatible with Stash's raw plugin interface.
+
+The native dashboard is available at:
+
+```text
+http://localhost:9999/?smart_dashboard=cinematic
+```
+
+The **Open Dashboard** task logs the matching URL for the current Stash base URL. This URL first loads the normal Stash UI, then the plugin JavaScript opens the Cinematic Dashboard as an in-app overlay.
+
+After the UI assets are loaded, a **Cinematic** button is also inserted into the standard Stash navigation bar. A floating **Stash Cinematic** launcher is kept as a fallback.
+
+Short-video cleanup is launched only from the **Library Tools** section in the dashboard. It is intentionally not shown as a normal Stash task button because native task buttons cannot display input fields. Enter a duration such as `0:30`, `1:15`, or `90`; the dashboard validates it and removes matching scene records from Stash with dynamic arguments. Original video files are left on disk.
 
 ## Generated Files
 
@@ -103,7 +148,7 @@ The plugin creates local files in its own plugin directory:
   Report containing suspected duplicate scene pairs, confidence scores, compared samples, and scene metadata.
 
 - `recommendations.json`  
-  Report containing dashboard recommendation data such as Forgotten Gems and Smart Suggestions.
+  Report containing dashboard recommendation data such as Library Spotlight, Forgotten Gems, Top Rated, Recently Watched, and Smart Suggestions. Scene cards include display metadata such as title, cover path, rating, tags, resolution, and file-name fallback data when available.
 
 These files are generated locally and are not sent to any external service.
 
