@@ -1,6 +1,6 @@
 name: "Smart Dashboard & Advanced Duplicate Finder"
 description: "AI-powered duplicate finder (pHash) and local recommendation engine for the dashboard."
-version: "0.1.0"
+version: "0.1.2"
 url: "https://github.com/Jaulustus/smart-dashboard"
 
 exec:
@@ -16,24 +16,3 @@ ui:
     - smart_dashboard.css
   assets:
     /: .
-
-tasks:
-  - name: "Setup / Install Dependencies"
-    description: "Installs the required Python packages (requests, opencv, etc.) / Installiert die benötigten Python-Pakete."
-    execArgs:
-      - "setup"
-
-  - name: "Open Dashboard"
-    description: "Logs the native Stash Cinematic dashboard route / Gibt die native Stash-Cinematic-Dashboard-Route aus."
-    execArgs:
-      - "open_dashboard"
-
-  - name: "Start Advanced Duplicate Scan / Erweiterte Duplikatsuche starten"
-    description: "Analyzes videos using Perceptual Hashing for visual duplicates."
-    execArgs:
-      - "smart_dup_scan"
-  
-  - name: "Update Dashboard Recommendations / Dashboard-Empfehlungen aktualisieren"
-    description: "Calculates local recommendations based on your viewing history."
-    execArgs:
-      - "smart_dash_calc"

@@ -7,7 +7,7 @@ A local Stashapp plugin for advanced visual duplicate detection and dashboard re
 
 ## Overview
 
-Smart Dashboard & Advanced Duplicate Finder adds two local automation tasks to Stash:
+Smart Dashboard & Advanced Duplicate Finder adds local automation and a Cinematic dashboard to Stash:
 
 - **Advanced Duplicate Scan** analyzes video files with perceptual hashing to detect visually similar scenes, even when resolution, bitrate, or compression differ.
 - **Dashboard Recommendations** analyzes local watch history through the Stash GraphQL API and generates recommendation data for forgotten favorites and smart suggestions.
@@ -51,6 +51,7 @@ The dashboard includes:
 - A **Cinematic** button in the standard Stash navigation bar.
 - Hero billboard with a featured scene.
 - Horizontal rows for Library Spotlight, Forgotten Gems, Top Rated, Recently Watched, and Smart Suggestions.
+- Duplicate scan results from `duplicates_report.json`.
 - Hoverable scene cards with cover art, rating, tags, resolution, and direct scene links.
 - Library Tools section with a guarded short-video cleanup action.
 - Title fallback logic that uses the Stash title first, then the scene file name if the title is empty or `Untitled`.
@@ -86,9 +87,9 @@ Before using the plugin, make sure:
 
 2. Open the Stash settings UI and click **Reload Plugins**.
 
-3. Run the **Setup / Install Dependencies** task from the Stash **Tasks** menu.
+3. Open the **Cinematic** dashboard from the Stash navigation bar.
 
-   This installs the required Python packages using `requirements.txt`.
+   On first open, the dashboard automatically starts the setup operation once for that browser profile. This installs the required Python packages using `requirements.txt`. Setup can also be started manually from the **Plugin Tasks** section inside Cinematic.
 
    For manual installation outside the Stash UI, run:
 
@@ -112,16 +113,9 @@ smart_dashboard
 
 ## Usage
 
-The plugin exposes its functionality through the native Stash **Tasks** menu.
+The plugin exposes its functionality through the native **Cinematic** dashboard instead of the standard Stash **Tasks** menu. This keeps setup, recommendations, duplicate scan, and cleanup in one place.
 
-Available tasks:
-
-- **Setup / Install Dependencies**
-- **Open Dashboard**
-- **Start Advanced Duplicate Scan / Erweiterte Duplikatsuche starten**
-- **Update Dashboard Recommendations / Dashboard-Empfehlungen aktualisieren**
-
-When a task is started, Stash runs the plugin backend script directly and passes the selected task argument to it.
+When an operation is started from Cinematic, Stash runs the plugin backend script directly and passes the selected mode to it.
 
 The plugin writes live progress and diagnostic output to the native Stash log window through `stderr`, keeping the task result output compatible with Stash's raw plugin interface.
 
@@ -131,9 +125,17 @@ The native dashboard is available at:
 http://localhost:9999/?smart_dashboard=cinematic
 ```
 
-The **Open Dashboard** task logs the matching URL for the current Stash base URL. This URL first loads the normal Stash UI, then the plugin JavaScript opens the Cinematic Dashboard as an in-app overlay.
+This URL first loads the normal Stash UI, then the plugin JavaScript opens the Cinematic Dashboard as an in-app overlay.
 
-After the UI assets are loaded, a **Cinematic** button is also inserted into the standard Stash navigation bar. A floating **Stash Cinematic** launcher is kept as a fallback.
+After the UI assets are loaded, a **Cinematic** button is inserted into the standard Stash navigation bar.
+
+On the first Cinematic open in a browser profile, the UI automatically starts **Setup / Install Dependencies** once. Cinematic also includes a **Plugin Tasks** section for manually starting Setup, Dashboard Recommendations, and the Advanced Duplicate Scan.
+
+If `recommendations.json` is missing, the Cinematic UI automatically starts **Update Dashboard Recommendations** once per browser session and temporarily falls back to live GraphQL scene data.
+
+The Cinematic header also shows the total number of videos currently known to Stash and a rough estimate for how long recommendation generation should take. This count is refreshed live through GraphQL, so it is not limited to the 50-item recommendation rows. The **Recommendations neu suchen** button rebuilds `recommendations.json`, which is useful after removing scenes from Stash.
+
+Duplicate scan results are shown in the **Duplicate Results** section. The section reads `duplicates_report.json`, displays the latest scan metadata, and lists suspected duplicate pairs with confidence, average distance, compared samples, scene titles, paths, and direct Stash scene links.
 
 Short-video cleanup is launched only from the **Library Tools** section in the dashboard. It is intentionally not shown as a normal Stash task button because native task buttons cannot display input fields. Enter a duration such as `0:30`, `1:15`, or `90`; the dashboard validates it and removes matching scene records from Stash with dynamic arguments. Original video files are left on disk.
 
@@ -182,7 +184,7 @@ Standard output is reserved for the raw JSON response expected by Stash.
 - The first duplicate scan can take time because every eligible video needs to be sampled and hashed.
 - Later scans should be faster when the SQLite cache can be reused.
 - Very large libraries may produce a large number of pairwise comparisons.
-- If Python dependencies are missing, the plugin reports the missing packages in the Stash task output.
+- If Python dependencies are missing, the plugin reports the missing packages in the Stash operation output.
 
 ## License
 

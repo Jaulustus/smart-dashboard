@@ -37,12 +37,16 @@ MIN_HASH_SAMPLES = 3
 DUPLICATE_CONFIDENCE_THRESHOLD = 0.90
 RECENT_WATCH_DAYS = 90
 FORGOTTEN_DAYS = 180
-REQUIRED_DEPENDENCIES: Sequence[Tuple[str, str]] = (
-    ("requests", "requests"),
-    ("cv2", "opencv-python"),
-    ("numpy", "numpy"),
-    ("imagehash", "imagehash"),
-)
+REQUIRED_DEPENDENCIES: Dict[str, Sequence[Tuple[str, str]]] = {
+    "smart_dup_scan": (
+        ("requests", "requests"),
+        ("cv2", "opencv-python"),
+        ("numpy", "numpy"),
+        ("imagehash", "imagehash"),
+    ),
+    "smart_dash_calc": (("requests", "requests"),),
+    "cleanup_short": (("requests", "requests"),),
+}
 
 
 class SmartDashboardError(Exception):
@@ -78,24 +82,23 @@ def log(message: str) -> None:
     print(f"[{PLUGIN_NAME}] {message}", file=sys.stderr, flush=True)
 
 
-def ensure_runtime_dependencies() -> None:
-    try:
-        import requests  # type: ignore # noqa: F401
-        import cv2  # type: ignore # noqa: F401
-        import numpy  # type: ignore # noqa: F401
-        import imagehash  # type: ignore # noqa: F401
-    except ImportError as exc:
-        missing_module = getattr(exc, "name", None) or str(exc)
-        matching_package = next(
-            (package for module, package in REQUIRED_DEPENDENCIES if module == missing_module),
-            missing_module,
-        )
-        log(
-            "Eine benoetigte Python-Abhaengigkeit fehlt "
-            f"({matching_package}). Bitte starte zuerst den Task "
-            "'Setup / Install Dependencies' in der Stash UI."
-        )
-        sys.exit(1)
+def ensure_runtime_dependencies(task: str) -> None:
+    required = REQUIRED_DEPENDENCIES.get(task, (("requests", "requests"),))
+    for module_name, package_name in required:
+        try:
+            __import__(module_name)
+        except ImportError:
+            matching_package = package_name
+            break
+    else:
+        return
+
+    log(
+        "Eine benoetigte Python-Abhaengigkeit fehlt "
+        f"({matching_package}). Bitte starte zuerst den Task "
+        "'Setup / Install Dependencies' in der Stash UI."
+    )
+    sys.exit(1)
 
 
 def utc_now() -> dt.datetime:
@@ -117,6 +120,19 @@ def write_json_file(path: Path, payload: Dict[str, Any]) -> None:
 def run_setup_dependencies() -> Dict[str, Any]:
     if not REQUIREMENTS_FILE.exists():
         raise SmartDashboardError(f"requirements.txt nicht gefunden: {REQUIREMENTS_FILE}")
+
+    ensurepip_command = [sys.executable, "-m", "ensurepip", "--upgrade"]
+    log("Pruefe Python-pip Verfuegbarkeit.")
+    ensurepip_result = subprocess.run(
+        ensurepip_command,
+        cwd=str(PLUGIN_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if ensurepip_result.stdout:
+        for line in ensurepip_result.stdout.splitlines():
+            print(line.rstrip(), file=sys.stderr, flush=True)
 
     command = [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)]
     log("Starte Installation der Python-Abhaengigkeiten.")
@@ -1470,6 +1486,10 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
         "generated_at": iso_now(),
         "graphql_query_variant": query_variant,
         "stash_base_url": stash_base_url,
+        "library_stats": {
+            "total_scenes": len(scenes),
+            "estimated_recommendation_seconds": max(5, round(len(scenes) / 80)),
+        },
         "parameters": {
             "forgotten_days": FORGOTTEN_DAYS,
             "recent_watch_days": RECENT_WATCH_DAYS,
@@ -1543,7 +1563,7 @@ def main() -> None:
         elif task == "open_dashboard":
             response = success_response(run_open_dashboard(payload))
         else:
-            ensure_runtime_dependencies()
+            ensure_runtime_dependencies(task)
             client = make_client(payload)
             if task == "smart_dup_scan":
                 response = success_response(run_duplicate_scan(client))
