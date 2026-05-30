@@ -51,6 +51,9 @@ The dashboard includes:
 - A **Cinematic** button in the standard Stash navigation bar.
 - Hero billboard with a featured scene.
 - Horizontal rows for Library Spotlight, Forgotten Gems, Top Rated, Recently Watched, and Smart Suggestions.
+- **Cinematic Search** for title, filename, and tag searches across the full Stash library.
+- An in-dashboard video player for opening scene cards without leaving Cinematic.
+- A **From Your Top Tags** row based on the weighted tag profile from local viewing behavior.
 - **Random Picks** with six live random scenes pulled from the full Stash library.
 - Duplicate scan results from `duplicates_report.json`.
 - Hoverable scene cards with cover art, rating, tags, resolution, and direct scene links.
@@ -136,6 +139,12 @@ On the first Cinematic open in a browser profile, the UI automatically starts **
 If `recommendations.json` is missing, the Cinematic UI temporarily falls back to live GraphQL scene data. Use **Refresh Recommendations** to rebuild the local report when needed.
 
 The Cinematic header also shows the total number of videos currently known to Stash and a rough estimate for how long recommendation generation should take. This count is refreshed live through GraphQL, so it is not limited to the 50-item recommendation rows. The **Refresh Recommendations** button rebuilds `recommendations.json`, which is useful after removing scenes from Stash.
+
+The **Cinematic Search** section searches the full Stash library by title, file name, and comma-separated tags. The first search loads the library through paginated GraphQL requests and caches the result in the browser for faster follow-up searches.
+
+Clicking a scene card opens the built-in Cinematic player overlay. The overlay streams the scene through Stash and also includes an **Open in Stash** link.
+
+The **From Your Top Tags** row prioritizes scenes that match the strongest tags in the generated preference profile. If no weighted tag profile is available, the dashboard falls back to frequently appearing tags in the loaded recommendation rows.
 
 The recommendation rows intentionally show curated slices, while **Random Picks** fetches six random scenes from the full Stash library. The **Refresh Picks** button pulls a new random set without rebuilding `recommendations.json`.
 

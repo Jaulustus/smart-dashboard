@@ -16,6 +16,7 @@
   const SETUP_AUTOSTART_KEY = "smart_dashboard_setup_autostarted";
   const MAX_REGISTER_ATTEMPTS = 80;
   let registerAttempts = 0;
+  let librarySearchCache = null;
 
   function pluginBasePath() {
     const scripts = Array.from(document.scripts);
@@ -375,6 +376,7 @@
       performers: Array.isArray(scene.performers) ? scene.performers.map((performer) => performer.name).filter(Boolean) : [],
       studio: scene.studio && scene.studio.name,
       stash_url: `${window.location.origin}/scenes/${scene.id}`,
+      stream_url: `${window.location.origin}/scene/${scene.id}/stream`,
     };
   }
 
@@ -565,6 +567,69 @@
     return scenes.concat(fetchedScenes.filter(Boolean)).map(sceneFromGraphQL);
   }
 
+  async function fetchSearchLibraryScenes() {
+    if (librarySearchCache) {
+      return librarySearchCache;
+    }
+
+    const query = `
+      query SmartDashboardSearchScenes($filter: FindFilterType!) {
+        findScenes(filter: $filter) {
+          count
+          scenes {
+            id
+            title
+            rating100
+            play_count
+            last_played_at
+            paths { screenshot }
+            files { path width height }
+            tags { name }
+            performers { name }
+            studio { name }
+          }
+        }
+      }
+    `;
+    const scenes = [];
+    const perPage = 500;
+    let page = 1;
+    let total = null;
+
+    while (total === null || scenes.length < total) {
+      const response = await fetch(`${pluginBasePath()}/graphql`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query,
+          variables: { filter: { page, per_page: perPage } },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+      if (payload.errors && payload.errors.length) {
+        throw new Error(payload.errors.map((error) => error.message || String(error)).join("; "));
+      }
+
+      const container = payload.data && payload.data.findScenes ? payload.data.findScenes : {};
+      const pageScenes = Array.isArray(container.scenes) ? container.scenes : [];
+      scenes.push(...pageScenes);
+      total = Number.isFinite(Number(container.count)) ? Number(container.count) : scenes.length;
+      if (!pageScenes.length || pageScenes.length < perPage) {
+        break;
+      }
+      page += 1;
+    }
+
+    librarySearchCache = scenes.map((scene, index) => sceneFromGraphQL(scene, index));
+    return librarySearchCache;
+  }
+
   async function fetchDashboardData(options) {
     const data = await fetchRecommendations(options);
     try {
@@ -670,6 +735,7 @@
       playCount: scene.play_count || 0,
       lastPlayedAt: scene.last_played_at || "",
       stashUrl: scene.stash_url || `${stashBaseUrl.replace(/\/$/, "")}/scenes/${id}`,
+      streamUrl: scene.stream_url || `${stashBaseUrl.replace(/\/$/, "")}/scene/${id}/stream`,
     };
   }
 
@@ -793,6 +859,16 @@
           href: scene.stashUrl,
           target: "_blank",
           rel: "noopener noreferrer",
+          onClick: props.onPlay
+            ? (event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+                  return;
+                }
+
+                event.preventDefault();
+                props.onPlay(props.scene);
+              }
+            : undefined,
         },
         h("div", {
           className: "sd-scene-backdrop",
@@ -894,6 +970,7 @@
                 key: `${props.id}-${scene.id || index}`,
                 scene,
                 stashBaseUrl: props.stashBaseUrl,
+                onPlay: props.onPlay,
               })
             )
           ),
@@ -931,6 +1008,57 @@
         });
       });
       return scenes;
+    }
+
+    function topTagNamesFromData(data, scenes) {
+      const profileTags =
+        data.preference_profile && Array.isArray(data.preference_profile.top_tags)
+          ? data.preference_profile.top_tags
+          : [];
+      const names = profileTags
+        .map((tag) => (typeof tag === "string" ? tag : tag && tag.name))
+        .filter(Boolean);
+
+      if (names.length) {
+        return names.slice(0, 5);
+      }
+
+      const counts = new Map();
+      scenes.forEach((scene) => {
+        (Array.isArray(scene.tags) ? scene.tags : []).forEach((tag) => {
+          const name = String(tag || "").trim();
+          if (name) {
+            counts.set(name, (counts.get(name) || 0) + 1);
+          }
+        });
+      });
+
+      return Array.from(counts.entries())
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 5)
+        .map((entry) => entry[0]);
+    }
+
+    function buildTopTagScenes(rows, data) {
+      const scenes = uniqueScenesFromRows(rows);
+      const tagNames = topTagNamesFromData(data, scenes);
+      const normalizedTags = tagNames.map((tag) => tag.toLowerCase());
+
+      if (!normalizedTags.length) {
+        return { tagNames, scenes: [] };
+      }
+
+      const matches = scenes
+        .map((scene) => {
+          const sceneTags = (Array.isArray(scene.tags) ? scene.tags : []).map((tag) => String(tag).toLowerCase());
+          const matchCount = normalizedTags.filter((tag) => sceneTags.includes(tag)).length;
+          return { scene, matchCount };
+        })
+        .filter((item) => item.matchCount > 0)
+        .sort((left, right) => right.matchCount - left.matchCount || (right.scene.score || 0) - (left.scene.score || 0))
+        .map((item) => item.scene);
+
+      return { tagNames, scenes: matches.slice(0, 50) };
     }
 
     function pickRandomScenes(scenes, count) {
@@ -1026,7 +1154,180 @@
               key: `random-${scene.id || scene.stash_url || index}`,
               scene,
               stashBaseUrl: props.stashBaseUrl,
+              onPlay: props.onPlay,
             })
+          )
+        )
+      );
+    }
+
+    function SearchPanel(props) {
+      const [titleQuery, setTitleQuery] = React.useState("");
+      const [tagQuery, setTagQuery] = React.useState("");
+      const [loading, setLoading] = React.useState(false);
+      const [results, setResults] = React.useState([]);
+      const [totalMatches, setTotalMatches] = React.useState(0);
+      const [message, setMessage] = React.useState(null);
+
+      async function handleSearch(event) {
+        event.preventDefault();
+        const titleTerm = titleQuery.trim().toLowerCase();
+        const tagTerms = tagQuery
+          .split(",")
+          .map((term) => term.trim().toLowerCase())
+          .filter(Boolean);
+
+        if (!titleTerm && !tagTerms.length) {
+          setResults([]);
+          setTotalMatches(0);
+          setMessage({ type: "error", text: "Enter a title, filename, or tag to search." });
+          return;
+        }
+
+        setLoading(true);
+        setMessage({ type: "info", text: "Searching the full Stash library..." });
+        try {
+          const scenes = await fetchSearchLibraryScenes();
+          const matches = scenes.filter((scene) => {
+            const titleHaystack = [
+              scene.title,
+              scene.stash_title,
+              scene.file_name,
+              scene.file_path,
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            const tagHaystack = (Array.isArray(scene.tags) ? scene.tags : [])
+              .join(" ")
+              .toLowerCase();
+            const titleMatches = titleTerm ? titleHaystack.includes(titleTerm) : true;
+            const tagMatches = tagTerms.length
+              ? tagTerms.every((term) => tagHaystack.includes(term))
+              : true;
+            return titleMatches && tagMatches;
+          });
+
+          setResults(matches.slice(0, 50));
+          setTotalMatches(matches.length);
+          setMessage({
+            type: matches.length ? "success" : "info",
+            text: matches.length
+              ? `${matches.length} match${matches.length === 1 ? "" : "es"} found. Showing up to 50.`
+              : "No matching scenes found.",
+          });
+        } catch (error) {
+          console.warn("[Smart Dashboard] Library search failed", error);
+          setResults([]);
+          setTotalMatches(0);
+          setMessage({ type: "error", text: "Search failed. Check the Stash logs for details." });
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      return h(
+        "section",
+        { className: "sd-search-panel", id: "cinematic-search" },
+        h(
+          "div",
+          { className: "sd-search-header" },
+          h("span", { className: "sd-tools-kicker" }, "Search"),
+          h("h2", null, "Cinematic Search"),
+          h("p", null, "Search the full Stash library by title, filename, or tags.")
+        ),
+        h(
+          "form",
+          { className: "sd-search-form", onSubmit: handleSearch },
+          h(
+            "label",
+            { className: "sd-search-label" },
+            "Title or filename",
+            h("input", {
+              className: "sd-search-input",
+              type: "search",
+              value: titleQuery,
+              placeholder: "Scene title or file name",
+              disabled: loading,
+              onChange: (event) => setTitleQuery(event.target.value),
+            })
+          ),
+          h(
+            "label",
+            { className: "sd-search-label" },
+            "Tags",
+            h("input", {
+              className: "sd-search-input",
+              type: "search",
+              value: tagQuery,
+              placeholder: "tag, another tag",
+              disabled: loading,
+              onChange: (event) => setTagQuery(event.target.value),
+            })
+          ),
+          h(
+            "button",
+            { className: "sd-search-button", type: "submit", disabled: loading },
+            loading ? "Searching..." : "Search Library"
+          )
+        ),
+        message
+          ? h("div", { className: `sd-search-status sd-search-status-${message.type}` }, message.text)
+          : null,
+        results.length
+          ? h(Row, {
+              id: "search-results",
+              title: "Search Results",
+              subtitle: `${totalMatches} total match${totalMatches === 1 ? "" : "es"} in your Stash library.`,
+              scenes: results,
+              icon: "⌕",
+              stashBaseUrl: props.stashBaseUrl,
+              onPlay: props.onPlay,
+            })
+          : null
+      );
+    }
+
+    function PlayerOverlay(props) {
+      if (!props.scene) {
+        return null;
+      }
+
+      const scene = normalizeScene(props.scene, props.stashBaseUrl);
+      return h(
+        "div",
+        { className: "sd-player-backdrop", role: "dialog", "aria-modal": "true" },
+        h(
+          "div",
+          { className: "sd-player-panel" },
+          h(
+            "div",
+            { className: "sd-player-header" },
+            h(
+              "div",
+              null,
+              h("span", { className: "sd-tools-kicker" }, "Now Playing"),
+              h("h2", null, scene.title)
+            ),
+            h(
+              "button",
+              { className: "sd-player-close", type: "button", onClick: props.onClose, "aria-label": "Close player" },
+              "×"
+            )
+          ),
+          h("video", {
+            className: "sd-player-video",
+            src: scene.streamUrl,
+            poster: scene.cover || undefined,
+            controls: true,
+            autoPlay: true,
+            playsInline: true,
+          }),
+          h(
+            "div",
+            { className: "sd-player-actions" },
+            h("span", null, [ratingText(scene.rating), scene.resolution, scene.studio].filter(Boolean).join(" • ")),
+            h("a", { href: scene.stashUrl, target: "_blank", rel: "noopener noreferrer" }, "Open in Stash")
           )
         )
       );
@@ -1062,8 +1363,12 @@
             { className: "sd-hero-actions" },
             scene
               ? h(
-                  "a",
-                  { className: "sd-button sd-button-primary", href: scene.stashUrl, target: "_blank", rel: "noopener noreferrer" },
+                  "button",
+                  {
+                    className: "sd-button sd-button-primary",
+                    type: "button",
+                    onClick: () => (props.onPlay ? props.onPlay(props.scene) : window.open(scene.stashUrl, "_blank", "noopener,noreferrer")),
+                  },
                   "Play"
                 )
               : null,
@@ -1424,6 +1729,7 @@
     function DashboardPage() {
       const [state, setState] = React.useState({ loading: true, error: null, data: null });
       const [refreshState, setRefreshState] = React.useState({ busy: false, message: null, type: "info" });
+      const [playerScene, setPlayerScene] = React.useState(null);
 
       React.useEffect(() => {
         let active = true;
@@ -1559,6 +1865,7 @@
         data.recommendations_autostart && data.recommendations_autostart.started
       );
       const randomPool = uniqueScenesFromRows(rows);
+      const topTagFeed = buildTopTagScenes(rows, data);
 
       return h(
         "div",
@@ -1592,7 +1899,8 @@
         refreshState.message
           ? h("div", { className: `sd-refresh-status sd-refresh-status-${refreshState.type}` }, refreshState.message)
           : null,
-        h(Hero, { scene: featured, stashBaseUrl }),
+        h(PlayerOverlay, { scene: playerScene, stashBaseUrl, onClose: () => setPlayerScene(null) }),
+        h(Hero, { scene: featured, stashBaseUrl, onPlay: setPlayerScene }),
         h(
           "section",
           { className: "sd-stats" },
@@ -1601,6 +1909,22 @@
           h(StatCard, { icon: "▣", label: "Library Spotlight", value: (data.library_spotlight || []).length }),
           h(StatCard, { icon: "✦", label: "Smart Suggestions", value: (data.smart_suggestions || []).length })
         ),
+        h(SearchPanel, { stashBaseUrl, onPlay: setPlayerScene }),
+        topTagFeed.scenes.length
+          ? h(
+              "div",
+              { className: "sd-rows sd-top-tags-row" },
+              h(Row, {
+                id: "top-tags-feed",
+                title: "From Your Top Tags",
+                subtitle: `Prioritized from: ${topTagFeed.tagNames.join(", ")}`,
+                scenes: topTagFeed.scenes,
+                icon: "#",
+                stashBaseUrl,
+                onPlay: setPlayerScene,
+              })
+            )
+          : null,
         totalScenes
           ? h(
               "div",
@@ -1614,6 +1938,7 @@
                   scenes: row[3],
                   icon: row[4],
                   stashBaseUrl,
+                  onPlay: setPlayerScene,
                 })
               )
             )
@@ -1624,7 +1949,7 @@
               h("h2", null, "No recommendation rows yet"),
               h("p", null, "Click 'Refresh Recommendations' above to rebuild the rows.")
             ),
-        h(RandomPicks, { scenes: randomPool, stashBaseUrl }),
+        h(RandomPicks, { scenes: randomPool, stashBaseUrl, onPlay: setPlayerScene }),
         h(PluginTasks, { autostarted: recommendationsAutostarted }),
         h(DuplicateResults, null),
         h(LibraryTools, null)

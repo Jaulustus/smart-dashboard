@@ -1337,6 +1337,7 @@ def recommendation_item(
         "performers": entity_names(scene.get("performers")),
         "studio": studio_name(scene),
         "stash_url": f"{stash_base_url.rstrip('/')}/scenes/{scene_id}",
+        "stream_url": f"{stash_base_url.rstrip('/')}/scene/{scene_id}/stream",
     }
 
 

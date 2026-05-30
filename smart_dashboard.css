@@ -672,6 +672,199 @@
   color: var(--sd-muted);
 }
 
+.sd-player-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3090;
+  display: grid;
+  place-items: center;
+  padding: clamp(1rem, 4vw, 3rem);
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(18px);
+}
+
+.sd-player-panel {
+  width: min(72rem, 96vw);
+  overflow: hidden;
+  color: #fff;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.032)),
+    #08080a;
+  border: 1px solid var(--sd-line);
+  border-radius: 1.35rem;
+  box-shadow: 0 2rem 6rem rgba(0, 0, 0, 0.6);
+}
+
+.sd-player-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.25rem 0.9rem;
+}
+
+.sd-player-header h2 {
+  margin: 0;
+  font-size: clamp(1.45rem, 3vw, 2.4rem);
+  font-weight: 950;
+  letter-spacing: -0.05em;
+}
+
+.sd-player-close {
+  display: grid;
+  width: 2.4rem;
+  height: 2.4rem;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.sd-player-video {
+  display: block;
+  width: 100%;
+  max-height: min(68vh, 44rem);
+  background: #000;
+}
+
+.sd-player-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem 1.25rem;
+  color: var(--sd-muted);
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.sd-player-actions a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 950;
+}
+
+.sd-player-actions a:hover {
+  color: #f1d7ff;
+  text-decoration: underline;
+}
+
+.sd-search-panel {
+  max-width: 118rem;
+  margin: 0 auto 3rem;
+  padding: 0 clamp(1.25rem, 4vw, 4rem);
+}
+
+.sd-search-header,
+.sd-search-form,
+.sd-search-status {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.072), rgba(255, 255, 255, 0.032)),
+    radial-gradient(circle at top right, rgba(142, 68, 173, 0.2), transparent 18rem);
+  border: 1px solid var(--sd-line);
+  border-radius: 1.25rem;
+  box-shadow: 0 1.2rem 3.5rem rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(18px);
+}
+
+.sd-search-header {
+  padding: 1.5rem;
+}
+
+.sd-search-header h2 {
+  margin: 0;
+  font-size: clamp(1.75rem, 4vw, 2.8rem);
+  font-weight: 950;
+  letter-spacing: -0.06em;
+}
+
+.sd-search-header p {
+  max-width: 58rem;
+  margin: 0.65rem 0 0;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.6;
+}
+
+.sd-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  align-items: end;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.sd-search-label {
+  display: grid;
+  gap: 0.45rem;
+  color: #fff;
+  font-size: 0.86rem;
+  font-weight: 900;
+}
+
+.sd-search-input {
+  min-height: 3rem;
+  width: 100%;
+  padding: 0 0.95rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.75rem;
+  font: inherit;
+  outline: none;
+}
+
+.sd-search-input:focus {
+  border-color: rgba(142, 68, 173, 0.85);
+  box-shadow: 0 0 0 0.2rem rgba(142, 68, 173, 0.2);
+}
+
+.sd-search-button {
+  min-height: 3rem;
+  padding: 0 1.15rem;
+  color: #fff;
+  background: linear-gradient(135deg, rgba(142, 68, 173, 0.98), rgba(62, 17, 84, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.75rem;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.sd-search-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.sd-search-status {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  font-size: 0.88rem;
+  font-weight: 850;
+}
+
+.sd-search-status-info {
+  color: #d9c8ff;
+}
+
+.sd-search-status-success {
+  color: #ceffdf;
+}
+
+.sd-search-status-error {
+  color: #ffd1d1;
+}
+
+.sd-search-panel .sd-row {
+  margin-top: 1.5rem;
+}
+
 .sd-task-panel {
   max-width: 118rem;
   margin: 4rem auto 0;
@@ -1165,6 +1358,10 @@
   }
 
   .sd-task-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sd-search-form {
     grid-template-columns: 1fr;
   }
 
