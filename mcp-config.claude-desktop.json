@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stash": {
+      "command": "python",
+      "args": ["/absolute/path/to/smart-dashboard/stash_mcp_server.py"],
+      "env": {
+        "STASH_GRAPHQL_URL": "http://localhost:9999/graphql",
+        "STASH_API_KEY": ""
+      }
+    }
+  }
+}

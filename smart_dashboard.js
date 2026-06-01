@@ -4,8 +4,13 @@
   const PLUGIN_ID = "smart_dashboard";
   const UI_VERSION = "0.2.0";
   const DASHBOARD_QUERY = "smart_dashboard=cinematic";
-  const ROUTE_LABEL = "Stash Cinematic";
+  const MCP_DASHBOARD_QUERY = "smart_dashboard=mcp";
   const SETUP_MODE = "setup";
+  const SETUP_AGENT_MODE = "setup_agent";
+  const BUILD_AGENT_INDEX_MODE = "build_agent_index";
+  const AGENT_QUERY_MODE = "agent_query";
+  const AGENT_INDEX_STATS_MODE = "agent_index_stats";
+  const MCP_SETUP_KEY = "smart_dashboard_mcp_setup_done";
   const RECOMMENDATIONS_MODE = "smart_dash_calc";
   const DUP_SCAN_MODE = "smart_dup_scan";
   const RECOMMENDATIONS_AUTOSTART_KEY = "smart_dashboard_recommendations_autostarted";
@@ -17,6 +22,20 @@
   const MAX_REGISTER_ATTEMPTS = 80;
   let registerAttempts = 0;
   let librarySearchCache = null;
+
+  function t(key, params) {
+    if (global.SmartDashboardI18n && typeof global.SmartDashboardI18n.t === "function") {
+      return global.SmartDashboardI18n.t(key, params);
+    }
+    return key;
+  }
+
+  function pluginLanguage() {
+    if (global.SmartDashboardI18n) {
+      return global.SmartDashboardI18n.getStashLanguage() || global.SmartDashboardI18n.getLocale() || "en-GB";
+    }
+    return "en-GB";
+  }
 
   function pluginBasePath() {
     const scripts = Array.from(document.scripts);
@@ -55,8 +74,86 @@
 
   function handleDashboardDeepLink() {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("smart_dashboard") === "cinematic") {
+    const mode = params.get("smart_dashboard");
+    if (mode === "mcp" && typeof window.smartDashboardMcpOpen === "function") {
+      window.smartDashboardMcpOpen();
+      return;
+    }
+    if (mode === "cinematic") {
       window.smartDashboardOpen();
+    }
+  }
+
+  function normalizePluginResult(raw) {
+    if (!raw) {
+      return null;
+    }
+    let value = raw;
+    if (typeof value === "string") {
+      try {
+        value = JSON.parse(value);
+      } catch (_error) {
+        return { reply: value };
+      }
+    }
+    if (value.result && typeof value.result === "object") {
+      return value.result;
+    }
+    if (value.reply || value.scenes || value.index) {
+      return value;
+    }
+    if (value.output) {
+      return { reply: value.output, ...value };
+    }
+    return value;
+  }
+
+  async function fetchAgentIndexStats() {
+    const raw = await runPluginModeOperation(AGENT_INDEX_STATS_MODE, {});
+    return normalizePluginResult(raw);
+  }
+
+  async function sendAgentChatMessage(message) {
+    const raw = await runPluginModeOperation(AGENT_QUERY_MODE, { message });
+    return normalizePluginResult(raw);
+  }
+
+  function openMcpRoute() {
+    if (typeof window.smartDashboardMcpOpen === "function") {
+      window.smartDashboardMcpOpen();
+      return;
+    }
+    window.history.pushState({}, "", `${pluginBasePath()}/?${MCP_DASHBOARD_QUERY}`);
+  }
+
+  function buildMcpConfigSnippet() {
+    const graphqlUrl = `${window.location.origin.replace(/\/$/, "")}/graphql`;
+    const placeholderPath = "C:/stash/plugins/local/smart-dashboard/stash_mcp_server.py";
+    return JSON.stringify(
+      {
+        mcpServers: {
+          stash: {
+            command: "python",
+            args: [placeholderPath],
+            env: {
+              STASH_GRAPHQL_URL: graphqlUrl,
+              STASH_API_KEY: "",
+            },
+          },
+        },
+      },
+      null,
+      2
+    );
+  }
+
+  async function copyMcpConfigSnippet() {
+    const text = buildMcpConfigSnippet();
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_error) {
+      return false;
     }
   }
 
@@ -150,6 +247,7 @@
           args: {
             task: mode,
             mode,
+            language: pluginLanguage(),
             ...(extraArgs || {}),
           },
         },
@@ -194,6 +292,7 @@
           argsMap: {
             task: mode,
             mode,
+            language: pluginLanguage(),
             ...(extraArgs || {}),
           },
         },
@@ -369,7 +468,7 @@
       rating: scene.rating100 ? Math.round((scene.rating100 / 20) * 100) / 100 : null,
       resolution: width && height ? `${width}x${height}` : "",
       score: Math.max(0, 1 - index / 1000),
-      reason: "Live from your Stash library",
+      reason: t("reason.liveFromLibrary"),
       play_count: scene.play_count || 0,
       last_played_at: scene.last_played_at || null,
       tags: Array.isArray(scene.tags) ? scene.tags.map((tag) => tag.name).filter(Boolean) : [],
@@ -743,19 +842,15 @@
     if (!value) {
       return "";
     }
-
-    return String(value)
-      .replace(/Aus deiner Stash-Bibliothek/g, "From your Stash library")
-      .replace(/noch nicht angesehen/g, "not watched yet")
-      .replace(/Hohe Bewertung/g, "High rating")
-      .replace(/ und seit /g, " and not watched for ")
-      .replace(/ Tagen nicht gesehen/g, " days")
-      .replace(/Bewertung/g, "rating");
+    if (global.SmartDashboardI18n && typeof global.SmartDashboardI18n.translateReason === "function") {
+      return global.SmartDashboardI18n.translateReason(value);
+    }
+    return String(value);
   }
 
   function ratingText(value) {
     if (value === null || value === undefined || Number.isNaN(Number(value))) {
-      return "Unrated";
+      return t("card.unrated");
     }
     return `${Number(value).toFixed(1)} / 5`;
   }
@@ -879,8 +974,8 @@
           "div",
           { className: "sd-card-content" },
           h("h3", { className: "sd-card-title", title: scene.title }, scene.title),
-          h("div", { className: "sd-card-meta" }, meta || `${scene.playCount} plays`),
-          h("p", { className: "sd-card-reason" }, scene.reason || "Open in Stash"),
+          h("div", { className: "sd-card-meta" }, meta || t("card.plays", { count: scene.playCount })),
+          h("p", { className: "sd-card-reason" }, scene.reason || t("card.openInStash")),
           h(
             "div",
             { className: "sd-card-tags" },
@@ -947,7 +1042,7 @@
             h("h2", null, h(Icon, null, props.icon), props.title),
             h("p", null, props.subtitle)
           ),
-          h("span", { className: "sd-row-count" }, `${props.scenes.length} scenes`)
+          h("span", { className: "sd-row-count" }, t("row.scenesCount", { count: props.scenes.length }))
         ),
         h(
           "div",
@@ -957,7 +1052,7 @@
             {
               className: "sd-rail-arrow sd-rail-arrow-left",
               type: "button",
-              "aria-label": `Scroll ${props.title} left`,
+              "aria-label": t("row.scrollLeft", { title: props.title }),
               onClick: () => scrollRail(-1),
             },
             "‹"
@@ -979,7 +1074,7 @@
             {
               className: "sd-rail-arrow sd-rail-arrow-right",
               type: "button",
-              "aria-label": `Scroll ${props.title} right`,
+              "aria-label": t("row.scrollRight", { title: props.title }),
               onClick: () => scrollRail(1),
             },
             "›"
@@ -1131,8 +1226,8 @@
             h(
               "div",
               null,
-              h("h2", null, h(Icon, null, "⟳"), "Random Picks"),
-              h("p", null, "Six random videos from your full Stash library.")
+              h("h2", null, h(Icon, null, "⟳"), t("random.title")),
+              h("p", null, t("random.subtitle"))
             ),
             h(
               "button",
@@ -1142,7 +1237,7 @@
                 disabled: loading,
                 onClick: refreshPicks,
               },
-              loading ? "Loading..." : "Refresh Picks"
+              loading ? t("random.loading") : t("random.refresh")
             )
           )
         ),
@@ -1180,12 +1275,12 @@
         if (!titleTerm && !tagTerms.length) {
           setResults([]);
           setTotalMatches(0);
-          setMessage({ type: "error", text: "Enter a title, filename, or tag to search." });
+          setMessage({ type: "error", text: t("search.error.empty") });
           return;
         }
 
         setLoading(true);
-        setMessage({ type: "info", text: "Searching the full Stash library..." });
+        setMessage({ type: "info", text: t("search.info.searching") });
         try {
           const scenes = await fetchSearchLibraryScenes();
           const matches = scenes.filter((scene) => {
@@ -1214,13 +1309,13 @@
             type: matches.length ? "success" : "info",
             text: matches.length
               ? `${matches.length} match${matches.length === 1 ? "" : "es"} found. Showing up to 50.`
-              : "No matching scenes found.",
+              : t("search.noResults"),
           });
         } catch (error) {
           console.warn("[Smart Dashboard] Library search failed", error);
           setResults([]);
           setTotalMatches(0);
-          setMessage({ type: "error", text: "Search failed. Check the Stash logs for details." });
+          setMessage({ type: "error", text: t("tasks.failed") });
         } finally {
           setLoading(false);
         }
@@ -1232,9 +1327,9 @@
         h(
           "div",
           { className: "sd-search-header" },
-          h("span", { className: "sd-tools-kicker" }, "Search"),
-          h("h2", null, "Cinematic Search"),
-          h("p", null, "Search the full Stash library by title, filename, or tags.")
+          h("span", { className: "sd-tools-kicker" }, t("search.kicker")),
+          h("h2", null, t("search.title")),
+          h("p", null, t("search.description"))
         ),
         h(
           "form",
@@ -1242,12 +1337,12 @@
           h(
             "label",
             { className: "sd-search-label" },
-            "Title or filename",
+            t("search.titleLabel"),
             h("input", {
               className: "sd-search-input",
               type: "search",
               value: titleQuery,
-              placeholder: "Scene title or file name",
+              placeholder: t("search.titlePlaceholder"),
               disabled: loading,
               onChange: (event) => setTitleQuery(event.target.value),
             })
@@ -1255,12 +1350,12 @@
           h(
             "label",
             { className: "sd-search-label" },
-            "Tags",
+            t("search.tagsLabel"),
             h("input", {
               className: "sd-search-input",
               type: "search",
               value: tagQuery,
-              placeholder: "tag, another tag",
+              placeholder: t("search.tagsPlaceholder"),
               disabled: loading,
               onChange: (event) => setTagQuery(event.target.value),
             })
@@ -1268,7 +1363,7 @@
           h(
             "button",
             { className: "sd-search-button", type: "submit", disabled: loading },
-            loading ? "Searching..." : "Search Library"
+            loading ? t("search.searching") : t("search.button")
           )
         ),
         message
@@ -1277,8 +1372,11 @@
         results.length
           ? h(Row, {
               id: "search-results",
-              title: "Search Results",
-              subtitle: `${totalMatches} total match${totalMatches === 1 ? "" : "es"} in your Stash library.`,
+              title: t("search.results.title"),
+              subtitle:
+                totalMatches === 1
+                  ? t("search.results.subtitle", { count: totalMatches })
+                  : t("search.results.subtitle_plural", { count: totalMatches }),
               scenes: results,
               icon: "⌕",
               stashBaseUrl: props.stashBaseUrl,
@@ -1306,12 +1404,17 @@
             h(
               "div",
               null,
-              h("span", { className: "sd-tools-kicker" }, "Now Playing"),
+              h("span", { className: "sd-tools-kicker" }, t("player.nowPlaying")),
               h("h2", null, scene.title)
             ),
             h(
               "button",
-              { className: "sd-player-close", type: "button", onClick: props.onClose, "aria-label": "Close player" },
+              {
+                className: "sd-player-close",
+                type: "button",
+                onClick: props.onClose,
+                "aria-label": t("player.close"),
+              },
               "×"
             )
           ),
@@ -1327,7 +1430,7 @@
             "div",
             { className: "sd-player-actions" },
             h("span", null, [ratingText(scene.rating), scene.resolution, scene.studio].filter(Boolean).join(" • ")),
-            h("a", { href: scene.stashUrl, target: "_blank", rel: "noopener noreferrer" }, "Open in Stash")
+            h("a", { href: scene.stashUrl, target: "_blank", rel: "noopener noreferrer" }, t("player.openInStash"))
           )
         )
       );
@@ -1348,14 +1451,14 @@
         h(
           "div",
           { className: "sd-hero-content" },
-          h("div", { className: "sd-kicker" }, "Featured Scene"),
-          h("h1", null, scene ? scene.title : ROUTE_LABEL),
+          h("div", { className: "sd-kicker" }, t("hero.featured")),
+          h("h1", null, scene ? scene.title : t("app.title")),
           h(
             "p",
             null,
             scene
-              ? scene.reason || "A standout recommendation selected from your local Stash library."
-              : "Generate recommendations to unlock your cinematic dashboard."
+              ? scene.reason || t("hero.defaultDescription")
+              : t("hero.generateHint")
           ),
           h("div", { className: "sd-hero-tags" }, tags.map((tag) => h(Pill, { key: tag }, tag))),
           h(
@@ -1369,10 +1472,10 @@
                     type: "button",
                     onClick: () => (props.onPlay ? props.onPlay(props.scene) : window.open(scene.stashUrl, "_blank", "noopener,noreferrer")),
                   },
-                  "Play"
+                  t("hero.play")
                 )
               : null,
-            h("button", { className: "sd-button sd-button-secondary", type: "button", onClick: () => window.location.reload() }, "Refresh")
+            h("button", { className: "sd-button sd-button-secondary", type: "button", onClick: () => window.location.reload() }, t("hero.refresh"))
           )
         )
       );
@@ -1392,18 +1495,18 @@
             setStatuses((current) => ({
               ...current,
               setup: result.queued
-                ? `Automatic setup started. Job ID: ${result.job_id}`
-                : "Automatic setup completed directly.",
+                ? t("tasks.setup.autoStarted", { jobId: result.job_id })
+                : t("tasks.setup.autoDone"),
             }));
           } else if (result.error) {
             setStatuses((current) => ({
               ...current,
-              setup: "Automatic setup could not be started. Check the Stash logs for details.",
+              setup: t("tasks.setup.autoFailed"),
             }));
           } else {
             setStatuses((current) => ({
               ...current,
-              setup: "Setup has already been started for this browser.",
+              setup: t("tasks.setup.already"),
             }));
           }
         });
@@ -1414,18 +1517,18 @@
       }, []);
 
       async function startTask(key, mode, description) {
-        setStatuses((current) => ({ ...current, [key]: "Starting task..." }));
+        setStatuses((current) => ({ ...current, [key]: t("tasks.starting") }));
         try {
           const result = await runPluginModeTask(mode, description);
           const message = result.queued
-            ? `Started. Job ID: ${result.job_id}`
-            : "Completed directly. Reload the report or dashboard afterwards.";
+            ? t("tasks.started", { jobId: result.job_id })
+            : t("tasks.done");
           setStatuses((current) => ({ ...current, [key]: message }));
         } catch (error) {
           console.warn("[Smart Dashboard] Task start failed", error);
           setStatuses((current) => ({
             ...current,
-            [key]: "Could not be started. Check the Stash logs for details.",
+            [key]: t("tasks.failed"),
           }));
         }
       }
@@ -1436,36 +1539,32 @@
         h(
           "div",
           { className: "sd-task-panel-header" },
-          h("span", { className: "sd-tools-kicker" }, "Plugin Tasks"),
-          h("h2", null, "Run Tasks in Cinematic"),
-          h(
-            "p",
-            null,
-            "Setup starts automatically the first time Cinematic opens. You can also start every important plugin task manually here."
-          )
+          h("span", { className: "sd-tools-kicker" }, t("tasks.kicker")),
+          h("h2", null, t("tasks.title")),
+          h("p", null, t("tasks.description"))
         ),
         h(
           "div",
           { className: "sd-task-grid" },
           h(TaskButton, {
-            title: "Setup",
-            description: "Installs or updates Python dependencies.",
-            button: "Start Setup",
+            title: t("tasks.setup.title"),
+            description: t("tasks.setup.description"),
+            button: t("tasks.setup.button"),
             status: statuses.setup,
             onClick: () => startTask("setup", SETUP_MODE, "Smart Dashboard manual setup"),
           }),
           h(TaskButton, {
-            title: "Recommendations",
-            description: "Rebuilds recommendations.json for Cinematic.",
-            button: "Refresh Recommendations",
-            status: statuses.recommendations || (props.autostarted ? "Started automatically." : null),
+            title: t("tasks.recommendations.title"),
+            description: t("tasks.recommendations.description"),
+            button: t("tasks.recommendations.button"),
+            status: statuses.recommendations || (props.autostarted ? t("tasks.recommendations.autostart") : null),
             onClick: () =>
               startTask("recommendations", RECOMMENDATIONS_MODE, "Smart Dashboard refresh recommendations"),
           }),
           h(TaskButton, {
-            title: "Duplicate Scan",
-            description: "Starts the visual pHash duplicate scan.",
-            button: "Start Duplicate Scan",
+            title: t("tasks.duplicates.title"),
+            description: t("tasks.duplicates.description"),
+            button: t("tasks.duplicates.button"),
             status: statuses.duplicates,
             onClick: () => startTask("duplicates", DUP_SCAN_MODE, "Smart Dashboard duplicate scan"),
           })
@@ -1527,27 +1626,27 @@
         h(
           "div",
           { className: "sd-duplicates-header" },
-          h("span", { className: "sd-tools-kicker" }, "Duplicate Results"),
-          h("h2", null, "Duplicate Scan Results"),
+          h("span", { className: "sd-tools-kicker" }, t("duplicates.kicker")),
+          h("h2", null, t("duplicates.title")),
           h(
             "p",
             null,
-            "Candidates from duplicates_report.json appear here after the duplicate scan has finished."
+            t("duplicates.description")
           ),
           h(
             "button",
             { className: "sd-task-button", type: "button", onClick: loadReport, disabled: state.loading },
-            state.loading ? "Loading..." : "Reload Report"
+            state.loading ? t("random.loading") : t("duplicates.reload")
           )
         ),
         state.loading
-          ? h("div", { className: "sd-duplicates-empty" }, "Loading duplicate report...")
+          ? h("div", { className: "sd-duplicates-empty" }, t("duplicates.loading"))
           : state.error
             ? h(
                 "div",
                 { className: "sd-duplicates-empty" },
-                h("strong", null, "No duplicate report found yet."),
-                h("span", null, "Start the duplicate scan in Cinematic, then reload this report.")
+                h("strong", null, t("duplicates.empty")),
+                h("span", null, t("duplicates.emptyHint"))
               )
             : h(
                 "div",
@@ -1555,11 +1654,20 @@
                 h(
                   "div",
                   { className: "sd-duplicates-meta" },
-                  h("span", null, `Candidates: ${duplicates.length}`),
-                  h("span", null, `Hashed: ${report.hashed_scenes || 0}/${report.total_scenes || 0}`),
-                  h("span", null, `Cache: ${report.cache_hits || 0}`),
-                  h("span", null, `Skipped: ${skipped}`),
-                  report.generated_at ? h("span", null, `Updated: ${formatDate(report.generated_at)}`) : null
+                  h("span", null, t("duplicates.candidates", { count: duplicates.length })),
+                  h(
+                    "span",
+                    null,
+                    t("duplicates.hashed", {
+                      done: report.hashed_scenes || 0,
+                      total: report.total_scenes || 0,
+                    })
+                  ),
+                  h("span", null, t("duplicates.cache", { count: report.cache_hits || 0 })),
+                  h("span", null, t("duplicates.skipped", { count: skipped })),
+                  report.generated_at
+                    ? h("span", null, t("duplicates.updated", { date: formatDate(report.generated_at) }))
+                    : null
                 ),
                 duplicates.length
                   ? h(
@@ -1572,7 +1680,7 @@
                         })
                       )
                     )
-                  : h("div", { className: "sd-duplicates-empty" }, "No duplicate candidates in the latest report.")
+                  : h("div", { className: "sd-duplicates-empty" }, t("duplicates.none"))
               )
       );
     }
@@ -1590,7 +1698,7 @@
           "div",
           { className: "sd-duplicate-score" },
           h("strong", null, `${confidence}%`),
-          h("span", null, `Distance ${item.average_hamming_distance || "?"}`)
+          h("span", null, t("duplicates.distance", { value: item.average_hamming_distance || "?" }))
         ),
         h(DuplicateScene, { scene: sceneA, label: "A" }),
         h(DuplicateScene, { scene: sceneB, label: "B" }),
@@ -1630,33 +1738,31 @@
         if (!isValid) {
           setStatus({
             type: "error",
-            message: "Please enter a valid duration, for example 0:30, 1:15, or 90.",
+            message: t("cleanup.invalid"),
           });
           return;
         }
 
         const confirmed = window.confirm(
-          `This removes all scenes shorter than ${numericSeconds} seconds (${durationInput}) from Stash only.\n\n` +
-            "The original video files stay on disk. Matching scenes will no longer appear in Stash.\n\n" +
-            "Continue?"
+          t("cleanup.confirm", { seconds: numericSeconds, input: durationInput })
         );
         if (!confirmed) {
           return;
         }
 
         setBusy(true);
-        setStatus({ type: "info", message: "Cleanup is running..." });
+        setStatus({ type: "info", message: t("cleanup.running") });
         try {
           await runCleanupTask(numericSeconds);
           setStatus({
             type: "success",
-            message: "Cleanup finished. Check the Stash logs for details.",
+            message: t("cleanup.done"),
           });
         } catch (error) {
           console.warn("[Smart Dashboard] Cleanup start failed", error);
           setStatus({
             type: "error",
-            message: "Cleanup could not be started. Check the Stash logs for details.",
+            message: t("cleanup.failed"),
           });
         } finally {
           setBusy(false);
@@ -1669,13 +1775,9 @@
         h(
           "div",
           { className: "sd-tools-copy" },
-          h("span", { className: "sd-tools-kicker" }, "Library Tools"),
-          h("h2", null, "Short-Video Cleanup"),
-          h(
-            "p",
-            null,
-            "Remove scenes below a custom duration from Stash. The original video files stay on disk."
-          )
+          h("span", { className: "sd-tools-kicker" }, t("cleanup.kicker")),
+          h("h2", null, t("cleanup.title")),
+          h("p", null, t("cleanup.description"))
         ),
         h(
           "div",
@@ -1683,8 +1785,8 @@
           h(
             "label",
             { className: "sd-cleanup-label", htmlFor: "sd-cleanup-seconds" },
-            "Delete videos shorter than (minutes:seconds):",
-            h("span", null, "Scenes below this duration will be removed from Stash only.")
+            t("cleanup.label"),
+            h("span", null, t("cleanup.hint"))
           ),
           h(
             "div",
@@ -1694,7 +1796,7 @@
               className: isValid ? "sd-cleanup-input" : "sd-cleanup-input sd-cleanup-input-invalid",
               type: "text",
               inputMode: "numeric",
-              placeholder: "0:30 or 90",
+              placeholder: t("cleanup.placeholder"),
               value: durationInput,
               disabled: busy,
               onChange: (event) => setDurationInput(event.target.value),
@@ -1707,13 +1809,13 @@
                 disabled: busy || !isValid,
                 onClick: handlePurge,
               },
-              busy ? "Starting..." : "Purge"
+              busy ? t("cleanup.purging") : t("cleanup.purge")
             )
           ),
           h(
             "p",
             { className: "sd-cleanup-warning" },
-            "Stash cleanup only: matching scene records are removed with sceneDestroy(delete_file: false). Examples: 0:30, 1:15, 90."
+            t("cleanup.warning")
           ),
           status
             ? h(
@@ -1726,10 +1828,278 @@
       );
     }
 
+    function renderLogo() {
+      return h("div", { className: "sd-logo" }, h("span", null, t("app.brand")), " ", t("nav.cinematic"));
+    }
+
+    function formatTopbarMeta(data, libraryTotal, estimatedSeconds, autostartExtra) {
+      const params = {
+        version: UI_VERSION,
+        count: libraryTotal,
+        duration: formatDuration(estimatedSeconds),
+        extra: autostartExtra || "",
+      };
+      if (data.generated_at) {
+        return t("topbar.uiMeta", { ...params, date: formatDate(data.generated_at) });
+      }
+      return t("topbar.uiMetaNoDate", params);
+    }
+
+    function McpAgentPage() {
+      const [indexStats, setIndexStats] = React.useState(null);
+      const [messages, setMessages] = React.useState([]);
+      const [input, setInput] = React.useState("");
+      const [busy, setBusy] = React.useState(false);
+      const [scanBusy, setScanBusy] = React.useState(false);
+      const [setupBusy, setSetupBusy] = React.useState(false);
+      const [resultScenes, setResultScenes] = React.useState([]);
+      const [playerScene, setPlayerScene] = React.useState(null);
+      const [copyStatus, setCopyStatus] = React.useState("");
+      const [, setLocaleTick] = React.useState(0);
+      const stashBaseUrl = window.location.origin;
+      const mcpConfigText = buildMcpConfigSnippet();
+
+      React.useEffect(() => {
+        if (!global.SmartDashboardI18n) {
+          return undefined;
+        }
+        return global.SmartDashboardI18n.onChange(() => setLocaleTick((value) => value + 1));
+      }, []);
+
+      async function refreshIndexStats() {
+        try {
+          const payload = await fetchAgentIndexStats();
+          setIndexStats(payload && payload.index ? payload.index : payload);
+        } catch (error) {
+          console.warn("[Smart Dashboard] Could not load agent index stats", error);
+        }
+      }
+
+      async function ensureMcpDependencies() {
+        if (localStorage.getItem(MCP_SETUP_KEY) === "1") {
+          return;
+        }
+        setSetupBusy(true);
+        try {
+          await runPluginModeTask(SETUP_AGENT_MODE, "Smart Dashboard MCP agent setup");
+          localStorage.setItem(MCP_SETUP_KEY, "1");
+        } catch (error) {
+          console.warn("[Smart Dashboard] MCP dependency setup failed", error);
+        } finally {
+          setSetupBusy(false);
+        }
+      }
+
+      React.useEffect(() => {
+        setMessages([{ role: "assistant", text: t("mcpAgent.welcome") }]);
+        ensureMcpDependencies().then(refreshIndexStats);
+      }, []);
+
+      async function rebuildIndex() {
+        setScanBusy(true);
+        try {
+          const result = await runPluginModeTask(BUILD_AGENT_INDEX_MODE, "Smart Dashboard agent index rebuild");
+          if (!result.queued) {
+            await refreshIndexStats();
+            setMessages((current) => [
+              ...current,
+              { role: "assistant", text: t("mcpAgent.scanDone") },
+            ]);
+          } else {
+            setMessages((current) => [
+              ...current,
+              { role: "assistant", text: t("mcpAgent.scanStarted", { jobId: result.job_id }) },
+            ]);
+          }
+        } catch (error) {
+          console.warn("[Smart Dashboard] Agent index rebuild failed", error);
+          setMessages((current) => [...current, { role: "assistant", text: t("mcpAgent.scanFailed") }]);
+        } finally {
+          setScanBusy(false);
+        }
+      }
+
+      async function handleSend(event) {
+        if (event) {
+          event.preventDefault();
+        }
+        const text = input.trim();
+        if (!text || busy) {
+          return;
+        }
+        setInput("");
+        setBusy(true);
+        setMessages((current) => [...current, { role: "user", text }]);
+        try {
+          const response = await sendAgentChatMessage(text);
+          const reply = (response && response.reply) || t("mcpAgent.noReply");
+          const scenes = (response && response.scenes) || [];
+          setMessages((current) => [...current, { role: "assistant", text: reply }]);
+          setResultScenes(scenes.map((scene) => normalizeScene(scene, stashBaseUrl)));
+        } catch (error) {
+          console.warn("[Smart Dashboard] Agent chat failed", error);
+          setMessages((current) => [...current, { role: "assistant", text: t("mcpAgent.chatFailed") }]);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      const stats = indexStats || {};
+      const indexReady = Boolean(stats.ready && stats.scene_count > 0);
+
+      return h(
+        "div",
+        { className: "sd-shell sd-mcp-shell" },
+        h(
+          "div",
+          { className: "sd-topbar" },
+          h("div", { className: "sd-logo sd-logo-mcp" }, h("span", null, t("app.brand")), " ", t("mcpAgent.title")),
+          h(
+            "div",
+            { className: "sd-topbar-actions" },
+            h(
+              "button",
+              { className: "sd-topbar-button", type: "button", onClick: () => window.smartDashboardOpen() },
+              t("nav.cinematic")
+            )
+          )
+        ),
+        h(PlayerOverlay, { scene: playerScene, stashBaseUrl, onClose: () => setPlayerScene(null) }),
+        h(
+          "div",
+          { className: "sd-mcp-layout" },
+          h(
+            "aside",
+            { className: "sd-mcp-sidebar" },
+            h("span", { className: "sd-tools-kicker" }, t("mcpAgent.sidebarKicker")),
+            h("h2", null, t("mcpAgent.sidebarTitle")),
+            h("p", null, t("mcpAgent.sidebarDescription")),
+            h(
+              "div",
+              { className: "sd-mcp-stats" },
+              h("div", null, t("mcpAgent.statScenes", { count: stats.scene_count || 0 })),
+              h("div", null, t("mcpAgent.statTags", { count: stats.tag_count || 0 })),
+              h("div", null, t("mcpAgent.statPerformers", { count: stats.performer_count || 0 })),
+              h("div", null, t("mcpAgent.statStudios", { count: stats.studio_count || 0 }))
+            ),
+            h(
+              "button",
+              {
+                className: "sd-task-button",
+                type: "button",
+                disabled: scanBusy || setupBusy,
+                onClick: rebuildIndex,
+              },
+              scanBusy ? t("mcpAgent.scanning") : t("mcpAgent.scanButton")
+            ),
+            h(
+              "button",
+              {
+                className: "sd-task-button sd-task-button-secondary",
+                type: "button",
+                disabled: setupBusy,
+                onClick: ensureMcpDependencies,
+              },
+              setupBusy ? t("mcpAgent.setupBusy") : t("mcpAgent.setupButton")
+            ),
+            !indexReady
+              ? h("p", { className: "sd-mcp-hint" }, t("mcpAgent.indexMissing"))
+              : h("p", { className: "sd-mcp-hint" }, t("mcpAgent.indexReady")),
+            h("div", { className: "sd-mcp-connect" },
+              h("h3", null, t("mcpAgent.connectTitle")),
+              h("p", null, t("mcpAgent.connectStep1")),
+              h("p", null, t("mcpAgent.connectStep2")),
+              h("p", null, t("mcpAgent.connectStep3")),
+              h("p", null, t("mcpAgent.connectStep4")),
+              h("p", { className: "sd-mcp-hint-muted" }, t("mcpAgent.connectDoc")),
+              h(
+                "button",
+                {
+                  className: "sd-task-button sd-task-button-secondary",
+                  type: "button",
+                  onClick: async () => {
+                    const ok = await copyMcpConfigSnippet();
+                    setCopyStatus(ok ? t("mcpAgent.copyConfigDone") : t("mcpAgent.copyConfigFailed"));
+                  },
+                },
+                t("mcpAgent.copyConfig")
+              ),
+              copyStatus ? h("p", { className: "sd-mcp-copy-status" }, copyStatus) : null,
+              h("pre", { className: "sd-mcp-config-pre" }, mcpConfigText)
+            ),
+            h("p", { className: "sd-mcp-hint sd-mcp-hint-muted" }, t("mcpAgent.externalHint"))
+          ),
+          h(
+            "section",
+            { className: "sd-mcp-chat" },
+            h(
+              "div",
+              { className: "sd-mcp-messages" },
+              messages.map((entry, index) =>
+                h(
+                  "div",
+                  {
+                    key: `${entry.role}-${index}`,
+                    className: `sd-mcp-message sd-mcp-message-${entry.role}`,
+                  },
+                  entry.text
+                )
+              ),
+              busy ? h("div", { className: "sd-mcp-message sd-mcp-message-assistant" }, t("mcpAgent.thinking")) : null
+            ),
+            h(
+              "form",
+              { className: "sd-mcp-input-row", onSubmit: handleSend },
+              h("input", {
+                className: "sd-mcp-input",
+                type: "text",
+                value: input,
+                disabled: busy || !indexReady,
+                placeholder: indexReady ? t("mcpAgent.inputPlaceholder") : t("mcpAgent.inputDisabled"),
+                onChange: (event) => setInput(event.target.value),
+              }),
+              h(
+                "button",
+                { className: "sd-mcp-send", type: "submit", disabled: busy || !indexReady || !input.trim() },
+                t("mcpAgent.send")
+              )
+            ),
+            resultScenes.length
+              ? h(
+                  "div",
+                  { className: "sd-mcp-results" },
+                  h("h3", null, t("mcpAgent.resultsTitle")),
+                  h(
+                    "div",
+                    { className: "sd-rail sd-mcp-rail" },
+                    resultScenes.map((scene) =>
+                      h(SceneCard, {
+                        key: scene.id,
+                        scene,
+                        stashBaseUrl,
+                        onPlay: setPlayerScene,
+                      })
+                    )
+                  )
+                )
+              : null
+          )
+        )
+      );
+    }
+
     function DashboardPage() {
       const [state, setState] = React.useState({ loading: true, error: null, data: null });
       const [refreshState, setRefreshState] = React.useState({ busy: false, message: null, type: "info" });
       const [playerScene, setPlayerScene] = React.useState(null);
+      const [, setLocaleTick] = React.useState(0);
+
+      React.useEffect(() => {
+        if (!global.SmartDashboardI18n) {
+          return undefined;
+        }
+        return global.SmartDashboardI18n.onChange(() => setLocaleTick((value) => value + 1));
+      }, []);
 
       React.useEffect(() => {
         let active = true;
@@ -1757,7 +2127,7 @@
       }
 
       async function refreshRecommendations() {
-        setRefreshState({ busy: true, message: "Rebuilding recommendations...", type: "info" });
+        setRefreshState({ busy: true, message: t("refresh.rebuilding"), type: "info" });
         try {
           const result = await runPluginModeTask(RECOMMENDATIONS_MODE, "Smart Dashboard manual recommendations refresh", {
             refresh_reason: "manual_dashboard_refresh",
@@ -1765,7 +2135,7 @@
           if (result.queued) {
             setRefreshState({
               busy: false,
-              message: `Recommendations started as a background job. Job ID: ${result.job_id}. Reload after it finishes.`,
+              message: t("refresh.jobStarted", { jobId: result.job_id }),
               type: "info",
             });
           } else {
@@ -1773,7 +2143,7 @@
             await reloadDashboardData({ forceAssetFetch: true });
             setRefreshState({
               busy: false,
-              message: "Recommendations were rebuilt and reloaded.",
+              message: t("refresh.done"),
               type: "success",
             });
           }
@@ -1781,7 +2151,7 @@
           console.warn("[Smart Dashboard] Recommendations refresh failed", error);
           setRefreshState({
             busy: false,
-            message: "Recommendations could not be rebuilt. Check the Stash logs for details.",
+            message: t("refresh.failed"),
             type: "error",
           });
         }
@@ -1792,7 +2162,7 @@
           "div",
           { className: "sd-shell sd-centered" },
           h("div", { className: "sd-loader" }),
-          h("p", null, "Loading Stash Cinematic...")
+          h("p", null, t("loading.cinematic"))
         );
       }
 
@@ -1803,11 +2173,11 @@
           h(
             "div",
             { className: "sd-topbar" },
-            h("div", { className: "sd-logo" }, h("span", null, "Stash"), " Cinematic"),
+            renderLogo(),
             h(
               "div",
               { className: "sd-topbar-actions" },
-              h("div", { className: "sd-updated" }, "Library tools available"),
+              h("div", { className: "sd-updated" }, t("topbar.libraryTools")),
               h(
                 "button",
                 {
@@ -1816,7 +2186,7 @@
                   onClick: refreshRecommendations,
                   disabled: refreshState.busy,
                 },
-                refreshState.busy ? "Searching..." : "Refresh Recommendations"
+                refreshState.busy ? t("topbar.refreshBusy") : t("topbar.refresh")
               )
             )
           ),
@@ -1824,9 +2194,9 @@
             "div",
             { className: "sd-centered sd-error-panel" },
             h("div", { className: "sd-empty-icon" }, "!"),
-            h("h1", null, "recommendations.json not found"),
-            h("p", null, "Click 'Refresh Recommendations' to rebuild the Cinematic rows. Library Tools remain available."),
-            h("pre", null, "The local report is unavailable. Check the Stash logs for details.")
+            h("h1", null, t("error.recommendationsNotFound")),
+            h("p", null, t("error.recommendationsHint")),
+            h("pre", null, t("error.reportUnavailable"))
           ),
           h(PluginTasks, { autostarted: false }),
           refreshState.message
@@ -1841,11 +2211,35 @@
       const stashBaseUrl = data.stash_base_url || window.location.origin;
       const featured = chooseFeatured(data);
       const rows = [
-        ["library-spotlight", "Library Spotlight", "A reliable fallback row from your local scene library.", data.library_spotlight || [], "▣"],
-        ["forgotten-gems", "Forgotten Gems", "Highly rated scenes waiting for a comeback.", data.forgotten_gems || [], "◆"],
-        ["top-rated", "Top Rated", "The highest-rated scenes in your library.", data.top_rated || [], "★"],
-        ["recently-watched", "Recently Watched", "Continue the mood from your latest sessions.", data.recently_watched || [], "↺"],
-        ["smart-suggestions", "Smart Suggestions", "Generated from ratings, tags, studios, and watch history.", data.smart_suggestions || [], "✦"],
+        [
+          "library-spotlight",
+          t("row.library_spotlight.title"),
+          t("row.library_spotlight.subtitle"),
+          data.library_spotlight || [],
+          "▣",
+        ],
+        [
+          "forgotten-gems",
+          t("row.forgotten_gems.title"),
+          t("row.forgotten_gems.subtitle"),
+          data.forgotten_gems || [],
+          "◆",
+        ],
+        ["top-rated", t("row.top_rated.title"), t("row.top_rated.subtitle"), data.top_rated || [], "★"],
+        [
+          "recently-watched",
+          t("row.recently_watched.title"),
+          t("row.recently_watched.subtitle"),
+          data.recently_watched || [],
+          "↺",
+        ],
+        [
+          "smart-suggestions",
+          t("row.smart_suggestions.title"),
+          t("row.smart_suggestions.subtitle"),
+          data.smart_suggestions || [],
+          "✦",
+        ],
       ];
       const totalScenes = rows.reduce((sum, row) => sum + row[3].length, 0);
       const totalUniqueScenes = new Set(
@@ -1859,7 +2253,7 @@
         : estimateRecommendationSeconds(libraryTotal);
       const autostartLabel =
         data.recommendations_autostart && data.recommendations_autostart.started
-          ? ` • recommendations started (~${formatDuration(estimatedSeconds)})`
+          ? t("topbar.autostart", { duration: formatDuration(estimatedSeconds) })
           : "";
       const recommendationsAutostarted = Boolean(
         data.recommendations_autostart && data.recommendations_autostart.started
@@ -1873,17 +2267,11 @@
         h(
           "div",
           { className: "sd-topbar" },
-          h("div", { className: "sd-logo" }, h("span", null, "Stash"), " Cinematic"),
+          renderLogo(),
           h(
             "div",
             { className: "sd-topbar-actions" },
-            h(
-              "div",
-              { className: "sd-updated" },
-              data.generated_at
-                ? `UI ${UI_VERSION} • Updated ${formatDate(data.generated_at)} • ${libraryTotal} videos • est. ${formatDuration(estimatedSeconds)}${autostartLabel}`
-                : `UI ${UI_VERSION} • ${libraryTotal} videos • est. ${formatDuration(estimatedSeconds)}${autostartLabel}`
-            ),
+            h("div", { className: "sd-updated" }, formatTopbarMeta(data, libraryTotal, estimatedSeconds, autostartLabel)),
             h(
               "button",
               {
@@ -1892,7 +2280,7 @@
                 onClick: refreshRecommendations,
                 disabled: refreshState.busy,
               },
-              refreshState.busy ? "Searching..." : "Refresh Recommendations"
+              refreshState.busy ? t("topbar.refreshBusy") : t("topbar.refresh")
             )
           )
         ),
@@ -1904,10 +2292,10 @@
         h(
           "section",
           { className: "sd-stats" },
-          h(StatCard, { icon: "Σ", label: "Videos in Stash", value: libraryTotal }),
-          h(StatCard, { icon: "≈", label: "Estimated Build Time", value: formatDuration(estimatedSeconds) }),
-          h(StatCard, { icon: "▣", label: "Library Spotlight", value: (data.library_spotlight || []).length }),
-          h(StatCard, { icon: "✦", label: "Smart Suggestions", value: (data.smart_suggestions || []).length })
+          h(StatCard, { icon: "Σ", label: t("stats.videos"), value: libraryTotal }),
+          h(StatCard, { icon: "≈", label: t("stats.estimated"), value: formatDuration(estimatedSeconds) }),
+          h(StatCard, { icon: "▣", label: t("stats.spotlight"), value: (data.library_spotlight || []).length }),
+          h(StatCard, { icon: "✦", label: t("stats.suggestions"), value: (data.smart_suggestions || []).length })
         ),
         h(SearchPanel, { stashBaseUrl, onPlay: setPlayerScene }),
         topTagFeed.scenes.length
@@ -1916,8 +2304,8 @@
               { className: "sd-rows sd-top-tags-row" },
               h(Row, {
                 id: "top-tags-feed",
-                title: "From Your Top Tags",
-                subtitle: `Prioritized from: ${topTagFeed.tagNames.join(", ")}`,
+                title: t("topTags.title"),
+                subtitle: t("topTags.subtitle", { tags: topTagFeed.tagNames.join(", ") }),
                 scenes: topTagFeed.scenes,
                 icon: "#",
                 stashBaseUrl,
@@ -1946,8 +2334,8 @@
               "div",
               { className: "sd-empty" },
               h("div", { className: "sd-empty-icon" }, "▶"),
-              h("h2", null, "No recommendation rows yet"),
-              h("p", null, "Click 'Refresh Recommendations' above to rebuild the rows.")
+              h("h2", null, t("empty.noRows")),
+              h("p", null, t("empty.noRowsHint"))
             ),
         h(RandomPicks, { scenes: randomPool, stashBaseUrl, onPlay: setPlayerScene }),
         h(PluginTasks, { autostarted: recommendationsAutostarted }),
@@ -1985,7 +2373,7 @@
             className: "sd-overlay-close",
             type: "button",
             onClick: closeDashboardOverlay,
-            "aria-label": "Close Stash Cinematic",
+            "aria-label": t("overlay.close"),
           },
           "×"
         ),
@@ -2012,11 +2400,62 @@
       }
     }
 
-    window.smartDashboardOpen = showDashboardOverlay;
+    function closeMcpDashboardOverlay() {
+      const host = document.getElementById("smart-dashboard-mcp-overlay-root");
+      if (!host) {
+        return;
+      }
+      if (host._smartDashboardMcpRoot && host._smartDashboardMcpRoot.unmount) {
+        host._smartDashboardMcpRoot.unmount();
+      } else if (api.ReactDOM.unmountComponentAtNode) {
+        api.ReactDOM.unmountComponentAtNode(host);
+      }
+      host.remove();
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("smart_dashboard") === "mcp") {
+        window.history.replaceState({}, "", `${pluginBasePath()}/`);
+      }
+    }
 
-    mountNavigationButton();
-    observeNavigationForButton();
-    handleDashboardDeepLink();
+    function McpDashboardOverlay() {
+      return h(
+        "div",
+        { className: "sd-overlay sd-overlay-mcp" },
+        h(
+          "button",
+          {
+            className: "sd-overlay-close",
+            type: "button",
+            onClick: closeMcpDashboardOverlay,
+            "aria-label": t("mcpAgent.close"),
+          },
+          "×"
+        ),
+        h(McpAgentPage, null)
+      );
+    }
+
+    function showMcpDashboardOverlay() {
+      let host = document.getElementById("smart-dashboard-mcp-overlay-root");
+      if (!host) {
+        host = document.createElement("div");
+        host.id = "smart-dashboard-mcp-overlay-root";
+        document.body.appendChild(host);
+      }
+
+      window.history.pushState({}, "", `${pluginBasePath()}/?${MCP_DASHBOARD_QUERY}`);
+      if (api.ReactDOM.createRoot) {
+        if (!host._smartDashboardMcpRoot) {
+          host._smartDashboardMcpRoot = api.ReactDOM.createRoot(host);
+        }
+        host._smartDashboardMcpRoot.render(h(McpDashboardOverlay, null));
+      } else {
+        api.ReactDOM.render(h(McpDashboardOverlay, null), host);
+      }
+    }
+
+    window.smartDashboardOpen = showDashboardOverlay;
+    window.smartDashboardMcpOpen = showMcpDashboardOverlay;
   }
 
   function findNavigationContainer() {
@@ -2045,22 +2484,60 @@
     });
   }
 
-  function mountNavigationButton() {
-    if (document.getElementById("smart-dashboard-nav-button")) {
-      return true;
+  function showMcpSetupToast(message, variant) {
+    let toast = document.getElementById("smart-dashboard-mcp-toast");
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.id = "smart-dashboard-mcp-toast";
+      toast.className = "sd-mcp-toast";
+      document.body.appendChild(toast);
     }
 
-    const target = findNavigationContainer();
-    if (!target) {
-      return false;
+    toast.textContent = message;
+    toast.dataset.variant = variant || "info";
+    toast.hidden = false;
+    window.clearTimeout(showMcpSetupToast._hideTimer);
+    showMcpSetupToast._hideTimer = window.setTimeout(() => {
+      toast.hidden = true;
+    }, 12000);
+  }
+
+  async function triggerMcpAgentSetup(triggerButton) {
+    if (triggerButton) {
+      triggerButton.disabled = true;
+      triggerButton.dataset.busy = "1";
+    }
+
+    showMcpSetupToast(t("mcp.installing"), "info");
+
+    try {
+      const result = await runPluginModeTask(SETUP_AGENT_MODE, "Smart Dashboard MCP agent setup");
+      const message = result.queued
+        ? t("mcp.started", { jobId: result.job_id })
+        : t("mcp.done");
+      showMcpSetupToast(message, "success");
+    } catch (error) {
+      console.warn("[Smart Dashboard] MCP agent setup failed", error);
+      showMcpSetupToast(t("mcp.failed"), "error");
+    } finally {
+      if (triggerButton) {
+        triggerButton.disabled = false;
+        delete triggerButton.dataset.busy;
+      }
+    }
+  }
+
+  function appendNavigationButton(target, config) {
+    if (document.getElementById(config.id)) {
+      return;
     }
 
     const button = document.createElement("button");
-    button.id = "smart-dashboard-nav-button";
+    button.id = config.id;
     button.type = "button";
-    button.className = "sd-nav-button";
-    button.textContent = "Cinematic";
-    button.addEventListener("click", openRoute);
+    button.className = config.className;
+    button.textContent = config.label;
+    button.addEventListener("click", config.onClick);
 
     if (target.tagName === "UL" || target.tagName === "OL") {
       const item = document.createElement("li");
@@ -2070,6 +2547,27 @@
     } else {
       target.appendChild(button);
     }
+  }
+
+  function mountNavigationButton() {
+    const target = findNavigationContainer();
+    if (!target) {
+      return false;
+    }
+
+    appendNavigationButton(target, {
+      id: "smart-dashboard-nav-button",
+      className: "sd-nav-button",
+      label: t("nav.cinematic"),
+      onClick: openRoute,
+    });
+
+    appendNavigationButton(target, {
+      id: "smart-dashboard-mcp-nav-button",
+      className: "sd-nav-button sd-nav-button-mcp",
+      label: t("nav.mcp_server"),
+      onClick: openMcpRoute,
+    });
 
     return true;
   }
@@ -2094,5 +2592,36 @@
     });
   }
 
-  registerPlugin();
+  function syncNavigationLabels() {
+    const cinematicButton = document.getElementById("smart-dashboard-nav-button");
+    if (cinematicButton) {
+      cinematicButton.textContent = t("nav.cinematic");
+    }
+    const mcpButton = document.getElementById("smart-dashboard-mcp-nav-button");
+    if (mcpButton) {
+      mcpButton.textContent = t("nav.mcp_server");
+    }
+  }
+
+  function bootstrap() {
+    const getGraphqlUrl = () => `${pluginBasePath()}/graphql`;
+    const start = () => {
+      registerPlugin();
+      mountNavigationButton();
+      syncNavigationLabels();
+      if (global.SmartDashboardI18n) {
+        global.SmartDashboardI18n.onChange(syncNavigationLabels);
+      }
+      observeNavigationForButton();
+      handleDashboardDeepLink();
+    };
+
+    if (global.SmartDashboardI18n) {
+      global.SmartDashboardI18n.init({ getGraphqlUrl }).then(start).catch(start);
+      return;
+    }
+    start();
+  }
+
+  bootstrap();
 })();

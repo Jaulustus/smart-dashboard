@@ -11,6 +11,7 @@ interface: raw
 
 ui:
   javascript:
+    - smart_dashboard_i18n.js
     - smart_dashboard.js
   css:
     - smart_dashboard.css

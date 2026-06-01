@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from smart_dashboard_messages import msg
+
 
 PLUGIN_NAME = "Smart Dashboard & Advanced Duplicate Finder"
 AUTHOR = "Jaulustus"
@@ -28,6 +30,7 @@ CACHE_DB = PLUGIN_DIR / "cache.db"
 DUPLICATES_REPORT = PLUGIN_DIR / "duplicates_report.json"
 RECOMMENDATIONS_REPORT = PLUGIN_DIR / "recommendations.json"
 REQUIREMENTS_FILE = PLUGIN_DIR / "requirements.txt"
+REQUIREMENTS_AGENT_FILE = PLUGIN_DIR / "requirements-agent.txt"
 DASHBOARD_DEEP_LINK = "/?smart_dashboard=cinematic"
 
 HASH_SIZE = 8
@@ -46,6 +49,9 @@ REQUIRED_DEPENDENCIES: Dict[str, Sequence[Tuple[str, str]]] = {
     ),
     "smart_dash_calc": (("requests", "requests"),),
     "cleanup_short": (("requests", "requests"),),
+    "build_agent_index": (("requests", "requests"),),
+    "agent_query": (("requests", "requests"),),
+    "agent_index_stats": (("requests", "requests"),),
 }
 
 
@@ -117,10 +123,7 @@ def write_json_file(path: Path, payload: Dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def run_setup_dependencies() -> Dict[str, Any]:
-    if not REQUIREMENTS_FILE.exists():
-        raise SmartDashboardError(f"requirements.txt nicht gefunden: {REQUIREMENTS_FILE}")
-
+def _ensure_pip_available() -> None:
     ensurepip_command = [sys.executable, "-m", "ensurepip", "--upgrade"]
     log("Pruefe Python-pip Verfuegbarkeit.")
     ensurepip_result = subprocess.run(
@@ -134,8 +137,14 @@ def run_setup_dependencies() -> Dict[str, Any]:
         for line in ensurepip_result.stdout.splitlines():
             print(line.rstrip(), file=sys.stderr, flush=True)
 
-    command = [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)]
-    log("Starte Installation der Python-Abhaengigkeiten.")
+
+def _pip_install_requirements(requirements_path: Path, label: str) -> None:
+    if not requirements_path.exists():
+        raise SmartDashboardError(f"Requirements-Datei nicht gefunden: {requirements_path}")
+
+    _ensure_pip_available()
+    command = [sys.executable, "-m", "pip", "install", "-r", str(requirements_path)]
+    log(f"Starte Installation der {label}-Abhaengigkeiten.")
     log("Befehl: " + " ".join(command))
 
     process = subprocess.Popen(
@@ -155,10 +164,99 @@ def run_setup_dependencies() -> Dict[str, Any]:
     if exit_code != 0:
         raise SmartDashboardError(f"Dependency-Installation fehlgeschlagen (Exit-Code {exit_code}).")
 
-    log("Python-Abhaengigkeiten erfolgreich installiert.")
+    log(f"{label.capitalize()}-Abhaengigkeiten erfolgreich installiert.")
+
+
+def get_language(payload: Dict[str, Any]) -> Optional[str]:
+    value = (
+        os.environ.get("STASH_LANGUAGE")
+        or deep_find(payload, ["language", "locale", "ui_language", "uiLanguage"])
+    )
+    return str(value).strip() if value not in (None, "") else None
+
+
+def run_setup_dependencies(language: Optional[str] = None) -> Dict[str, Any]:
+    _pip_install_requirements(REQUIREMENTS_FILE, "Dashboard")
     return {
-        "message": "Setup abgeschlossen: Python-Abhaengigkeiten wurden installiert.",
+        "message": msg(language, "setup.done"),
         "requirements_path": str(REQUIREMENTS_FILE),
+    }
+
+
+def get_agent_message(payload: Dict[str, Any], argv: Sequence[str]) -> str:
+    args = get_args_payload(payload)
+    for source in (
+        deep_find(payload, ["message", "query", "prompt"]),
+        args.get("message") if isinstance(args, dict) else None,
+        args.get("query") if isinstance(args, dict) else None,
+    ):
+        if isinstance(source, str) and source.strip():
+            return source.strip()
+    for arg in argv:
+        if arg.strip() and arg.strip() not in known_tasks_placeholder():
+            return arg.strip()
+    return ""
+
+
+def known_tasks_placeholder() -> set:
+    return {
+        "setup",
+        "setup_agent",
+        "build_agent_index",
+        "agent_query",
+        "agent_index_stats",
+        "smart_dup_scan",
+        "smart_dash_calc",
+        "open_dashboard",
+        "cleanup_short",
+    }
+
+
+def run_agent_index_stats() -> Dict[str, Any]:
+    from stash_agent.service import StashAgentService
+
+    stats = StashAgentService.from_config().get_agent_index_stats()
+    return {
+        "message": msg(None, "agent_index.stats"),
+        "index": stats,
+    }
+
+
+def run_build_agent_index(client: GraphQLClient, language: Optional[str] = None) -> Dict[str, Any]:
+    del language
+    from stash_agent.client import StashAgentClient
+    from stash_agent.config import AgentConfig
+    from stash_agent.index_builder import build_agent_index
+    from stash_agent.index_store import AgentIndexStore
+
+    config = AgentConfig.from_env()
+    api_key = client.headers.get("ApiKey")
+    agent_client = StashAgentClient(client.url, str(api_key) if api_key else None)
+    store = AgentIndexStore(config.agent_index_db)
+    return build_agent_index(agent_client, store, config, report_path=config.agent_index_report)
+
+
+def run_agent_query(payload: Dict[str, Any], argv: Sequence[str]) -> Dict[str, Any]:
+    from stash_agent.service import StashAgentService
+
+    message = get_agent_message(payload, argv)
+    if not message:
+        raise SmartDashboardError("agent_query requires a non-empty message.")
+
+    result = StashAgentService.from_config().agent_chat(message, language=get_language(payload))
+    return {
+        "message": result.get("reply", "Agent reply ready."),
+        **result,
+    }
+
+
+def run_setup_agent_dependencies(language: Optional[str] = None) -> Dict[str, Any]:
+    _pip_install_requirements(REQUIREMENTS_AGENT_FILE, "MCP-Agent")
+    return {
+        "message": msg(language, "setup_agent.done"),
+        "requirements_path": str(REQUIREMENTS_AGENT_FILE),
+        "mcp_server_path": str(PLUGIN_DIR / "stash_mcp_server.py"),
+        "mcp_config_example": str(PLUGIN_DIR / "mcp-config.example.json"),
     }
 
 
@@ -166,10 +264,7 @@ def run_open_dashboard(payload: Dict[str, Any]) -> Dict[str, Any]:
     stash_base_url = stash_base_url_from_graphql_url(get_graphql_url(payload))
     dashboard_url = f"{stash_base_url.rstrip('/')}{DASHBOARD_DEEP_LINK}"
     return {
-        "message": (
-            f"Dashboard: {dashboard_url} | "
-            "Falls noch keine Daten angezeigt werden, starte zuerst 'Update Dashboard Recommendations'."
-        ),
+        "message": msg(get_language(payload), "dashboard.open", url=dashboard_url),
         "dashboard_url": dashboard_url,
     }
 
@@ -233,7 +328,17 @@ def normalize_client_url(url: str) -> str:
 
 
 def detect_task(argv: Sequence[str], payload: Dict[str, Any]) -> Optional[str]:
-    known_tasks = {"setup", "smart_dup_scan", "smart_dash_calc", "open_dashboard", "cleanup_short"}
+    known_tasks = {
+        "setup",
+        "setup_agent",
+        "build_agent_index",
+        "agent_query",
+        "agent_index_stats",
+        "smart_dup_scan",
+        "smart_dash_calc",
+        "open_dashboard",
+        "cleanup_short",
+    }
 
     for arg in argv:
         cleaned = arg.strip()
@@ -909,7 +1014,7 @@ def compare_hash_chains(left: Sequence[str], right: Sequence[str]) -> Tuple[floa
     return confidence, average_distance, comparisons
 
 
-def run_duplicate_scan(client: GraphQLClient) -> Dict[str, Any]:
+def run_duplicate_scan(client: GraphQLClient, language: Optional[str] = None) -> Dict[str, Any]:
     cv2, np = ensure_video_dependencies()
     scenes, query_variant = fetch_scenes_with_variants(client, DUP_QUERY_VARIANTS)
     conn = init_cache()
@@ -996,9 +1101,12 @@ def run_duplicate_scan(client: GraphQLClient) -> Dict[str, Any]:
     write_json_file(DUPLICATES_REPORT, report)
 
     return {
-        "message": (
-            f"Duplikatscan abgeschlossen: {len(duplicates)} Kandidaten gefunden, "
-            f"{len(hashed_scenes)} Szenen gehasht, {cache_hits} Cache-Treffer."
+        "message": msg(
+            language,
+            "duplicates.done",
+            groups=len(duplicates),
+            hashed=len(hashed_scenes),
+            cache=cache_hits,
         ),
         "report_path": str(DUPLICATES_REPORT),
         "duplicates": len(duplicates),
@@ -1095,7 +1203,9 @@ def remove_deleted_scenes_from_recommendations(deleted_scene_ids: Sequence[str])
     return removed
 
 
-def run_cleanup_short(client: GraphQLClient, max_duration_seconds: float) -> Dict[str, Any]:
+def run_cleanup_short(
+    client: GraphQLClient, max_duration_seconds: float, language: Optional[str] = None
+) -> Dict[str, Any]:
     scenes, query_variant = fetch_scenes_with_variants(client, CLEANUP_QUERY_VARIANTS)
     candidates: List[Tuple[str, str, Optional[str], float]] = []
     missing_duration = 0
@@ -1142,9 +1252,12 @@ def run_cleanup_short(client: GraphQLClient, max_duration_seconds: float) -> Dic
     removed_recommendation_items = remove_deleted_scenes_from_recommendations(deleted_scene_ids)
 
     return {
-        "message": (
-            f"Short-Video-Cleanup abgeschlossen: {deleted}/{len(candidates)} Szenen "
-            f"unter {max_duration_seconds:g}s aus Stash entfernt. Dateien wurden nicht geloescht."
+        "message": msg(
+            language,
+            "cleanup.done",
+            deleted=deleted,
+            matched=len(candidates),
+            seconds=f"{max_duration_seconds:g}",
         ),
         "max_duration_seconds": max_duration_seconds,
         "matched_scenes": len(candidates),
@@ -1376,7 +1489,7 @@ def build_preference_counters(scenes: Sequence[Dict[str, Any]]) -> Tuple[Counter
     return tag_scores, studio_scores
 
 
-def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
+def run_dashboard_calc(client: GraphQLClient, language: Optional[str] = None) -> Dict[str, Any]:
     scenes, query_variant = fetch_scenes_with_variants(client, DASH_QUERY_VARIANTS)
     stash_base_url = stash_base_url_from_graphql_url(client.url)
     tag_scores, studio_scores = build_preference_counters(scenes)
@@ -1512,9 +1625,11 @@ def run_dashboard_calc(client: GraphQLClient) -> Dict[str, Any]:
     write_json_file(RECOMMENDATIONS_REPORT, report)
 
     return {
-        "message": (
-            f"Dashboard-Empfehlungen aktualisiert: {len(report['forgotten_gems'])} Forgotten Gems, "
-            f"{len(report['smart_suggestions'])} Smart Suggestions."
+        "message": msg(
+            language,
+            "recommendations.updated",
+            forgotten=len(report["forgotten_gems"]),
+            smart=len(report["smart_suggestions"]),
         ),
         "report_path": str(RECOMMENDATIONS_REPORT),
         "forgotten_gems": len(report["forgotten_gems"]),
@@ -1530,17 +1645,17 @@ def make_client(payload: Dict[str, Any]) -> GraphQLClient:
     return GraphQLClient(url=url, api_key=api_key, cookie=cookie)
 
 
-def success_response(result: Dict[str, Any]) -> Dict[str, Any]:
+def success_response(result: Dict[str, Any], language: Optional[str] = None) -> Dict[str, Any]:
     return {
-        "output": result.get("message", "Smart Dashboard Aufgabe abgeschlossen."),
+        "output": result.get("message", msg(language, "plugin.done")),
         "result": result,
     }
 
 
-def error_response(exc: Exception) -> Dict[str, Any]:
+def error_response(exc: Exception, language: Optional[str] = None) -> Dict[str, Any]:
     log(str(exc))
     return {
-        "output": f"Smart Dashboard Fehler: {exc}",
+        "output": msg(language, "plugin.error", error=exc),
         "error": str(exc),
     }
 
@@ -1548,38 +1663,46 @@ def error_response(exc: Exception) -> Dict[str, Any]:
 def main() -> None:
     payload = read_stash_payload()
     task = detect_task(sys.argv[1:], payload)
+    language = get_language(payload)
 
     try:
         if not task:
             response = {
-                "output": (
-                    "Smart Dashboard Plugin bereit. Bekannte Tasks: "
-                    "setup, smart_dup_scan, smart_dash_calc, open_dashboard, cleanup_short."
-                ),
+                "output": msg(language, "plugin.ready"),
                 "plugin": PLUGIN_NAME,
                 "author": AUTHOR,
             }
         elif task == "setup":
-            response = success_response(run_setup_dependencies())
+            response = success_response(run_setup_dependencies(language), language)
+        elif task == "setup_agent":
+            response = success_response(run_setup_agent_dependencies(language), language)
+        elif task == "agent_index_stats":
+            ensure_runtime_dependencies(task)
+            response = success_response(run_agent_index_stats(), language)
+        elif task == "agent_query":
+            ensure_runtime_dependencies(task)
+            response = success_response(run_agent_query(payload, sys.argv[1:]), language)
         elif task == "open_dashboard":
-            response = success_response(run_open_dashboard(payload))
+            response = success_response(run_open_dashboard(payload), language)
         else:
             ensure_runtime_dependencies(task)
             client = make_client(payload)
-            if task == "smart_dup_scan":
-                response = success_response(run_duplicate_scan(client))
+            if task == "build_agent_index":
+                response = success_response(run_build_agent_index(client, language), language)
+            elif task == "smart_dup_scan":
+                response = success_response(run_duplicate_scan(client, language), language)
             elif task == "smart_dash_calc":
-                response = success_response(run_dashboard_calc(client))
+                response = success_response(run_dashboard_calc(client, language), language)
             elif task == "cleanup_short":
                 max_duration = get_cleanup_max_duration(sys.argv[1:], payload)
-                response = success_response(run_cleanup_short(client, max_duration))
+                response = success_response(run_cleanup_short(client, max_duration, language), language)
             else:
-                raise SmartDashboardError(f"Unbekannter Task: {task}")
+                raise SmartDashboardError(msg(language, "task.unknown", task=task))
     except SmartDashboardError as exc:
-        response = error_response(exc)
+        response = error_response(exc, language)
     except Exception as exc:
         log(traceback.format_exc())
-        response = error_response(SmartDashboardError(f"Unerwarteter Fehler: {exc}"))
+        response = error_response(SmartDashboardError(f"Unexpected error: {exc}"), language)
 
     print(json.dumps(response, ensure_ascii=False))
 

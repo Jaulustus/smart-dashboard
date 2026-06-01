@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "stash": {
+      "command": "python",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR/stash_mcp_server.py"
+      ],
+      "env": {
+        "STASH_GRAPHQL_URL": "http://localhost:9999/graphql",
+        "STASH_API_KEY": ""
+      }
+    }
+  }
+}

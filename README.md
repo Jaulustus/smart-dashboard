@@ -12,6 +12,7 @@ Smart Dashboard & Advanced Duplicate Finder adds local automation and a Cinemati
 - **Advanced Duplicate Scan** analyzes video files with perceptual hashing to detect visually similar scenes, even when resolution, bitrate, or compression differ.
 - **Dashboard Recommendations** analyzes local watch history through the Stash GraphQL API and generates recommendation data for forgotten favorites and smart suggestions.
 - **Stash Cinematic UI** adds a native React-powered dashboard route directly inside the Stash web interface.
+- **MCP Agent** connects external AI agents (Cursor, Claude Desktop, OpenClaw, …) to your library via a local index and MCP tools.
 - **Short-Video Cleanup** lets users enter a duration in the dashboard and remove matching scene records from Stash while keeping the original files on disk.
 
 The plugin runs locally, communicates with the local Stash GraphQL API, and writes generated reports directly into the plugin directory.
@@ -57,9 +58,16 @@ The dashboard includes:
 - **Random Picks** with six live random scenes pulled from the full Stash library.
 - Duplicate scan results from `duplicates_report.json`.
 - Hoverable scene cards with cover art, rating, tags, resolution, and direct scene links.
-- English-only dashboard labels and status messages.
+- Dashboard UI follows the **language configured in Stash** (Settings → Interface → Language), with English and German fully translated and other locales falling back where needed.
 - Library Tools section with a guarded short-video cleanup action.
 - Title fallback logic that uses the Stash title first, then the scene file name if the title is empty or `Untitled`.
+
+### MCP Agent (in Stash + external agents)
+
+- **MCP-Server** navigation button opens a Cinematic-style agent hub: local chat, library scan, and copy-paste MCP config.
+- Builds **`agent_library.db`** (SQLite index of scenes, tags, performers, studios) for fast search.
+- **`stash_mcp_server.py`** exposes MCP tools for Cursor, Claude Desktop, OpenClaw, and other MCP clients.
+- UI and docs follow the **language configured in Stash** (see [MCP](#mcp-model-context-protocol) below).
 
 ## Tech Stack
 
@@ -69,7 +77,8 @@ The dashboard includes:
 - `opencv-python`
 - `numpy`
 - JavaScript/CSS Stash UI plugin assets
-- SQLite
+- SQLite (`cache.db`, `agent_library.db`)
+- `mcp` (Python MCP server for external agents)
 
 ## Prerequisites
 
@@ -165,7 +174,217 @@ The plugin creates local files in its own plugin directory:
 - `recommendations.json`  
   Report containing dashboard recommendation data such as Library Spotlight, Forgotten Gems, Top Rated, Recently Watched, and Smart Suggestions. Scene cards include display metadata such as title, cover path, rating, tags, resolution, and file-name fallback data when available.
 
+- `agent_library.db`  
+  SQLite index for the MCP agent (scenes, tags, performers, studios). Built via **Scan full library** in the MCP UI or `stash_rebuild_agent_index`.
+
+- `agent_index_report.json`  
+  Optional metadata written after an agent index rebuild.
+
 These files are generated locally and are not sent to any external service.
+
+## Agent integration (optional)
+
+The agent layer runs **locally** on the same machine as Stash. It is separate from the Stash plugin subprocess: you start the MCP server from your AI client, or use the in-Stash **MCP-Server** UI.
+
+### MCP (Model Context Protocol)
+
+Connect AI assistants (Cursor, Claude Desktop, OpenClaw, Windsurf, Cline, …) to search and edit your Stash library.
+
+#### In-Stash MCP Agent UI
+
+1. Click **MCP-Server** in the Stash navigation bar (or open `http://localhost:9999/?smart_dashboard=mcp`).
+2. On first open, **MCP dependencies** are installed (`requirements-agent.txt`).
+3. Click **Scan full library** to build `agent_library.db`.
+4. Use the built-in **chat** for quick queries against the local index (stats, tags, titles, scene IDs).
+5. Use **Connect your AI agent** in the sidebar to copy an MCP JSON config.
+
+The in-Stash chat uses the local index only (no external LLM). For full AI conversations, connect an external agent below.
+
+#### Prerequisites
+
+| Step | Action |
+|------|--------|
+| 1 | Stash running (default GraphQL: `http://localhost:9999/graphql`) |
+| 2 | Plugin installed and reloaded |
+| 3 | `pip install -r requirements-agent.txt` (or use **Install MCP dependencies** in the UI) |
+| 4 | Build `agent_library.db` (scan in UI or MCP tool `stash_rebuild_agent_index`) |
+
+Use the **same Python** Stash uses for plugins (see Stash settings / plugin task logs).
+
+#### Repository files (MCP)
+
+| File | Purpose |
+|------|---------|
+| `stash_mcp_server.py` | MCP server (stdio) for AI clients |
+| `stash_agent/` | GraphQL client, index builder, chat logic |
+| `requirements-agent.txt` | Python deps (`requests`, `mcp`) |
+| `mcp-config.example.json` | Generic MCP config template |
+| `mcp-config.cursor.json` | Template for Cursor |
+| `mcp-config.claude-desktop.json` | Template for Claude Desktop |
+| `mcp-config.openclaw.json` | Template for OpenClaw |
+
+#### Universal MCP configuration
+
+Replace `REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR` with your plugin folder path.
+
+```json
+{
+  "mcpServers": {
+    "stash": {
+      "command": "python",
+      "args": [
+        "REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR/stash_mcp_server.py"
+      ],
+      "env": {
+        "STASH_GRAPHQL_URL": "http://localhost:9999/graphql",
+        "STASH_API_KEY": ""
+      }
+    }
+  }
+}
+```
+
+If Stash uses an API key (*Settings → Security*), set `STASH_API_KEY`. Otherwise leave it empty.
+
+#### Connect Cursor
+
+1. Open **Cursor** → **Settings** → **MCP** (or edit MCP config JSON).
+2. Add the `stash` server block from [Universal MCP configuration](#universal-mcp-configuration), or copy `mcp-config.cursor.json`.
+3. Config file locations:
+   - Project: `.cursor/mcp.json`
+   - Windows: `%USERPROFILE%\.cursor\mcp.json`
+   - macOS/Linux: `~/.cursor/mcp.json`
+4. Restart Cursor or reload MCP servers.
+5. In chat, tools appear as `stash_*` (e.g. `stash_agent_chat`, `stash_search_scenes`).
+
+**Suggested first prompts:**
+
+- *Call `stash_rebuild_agent_index` if the index may be outdated.*
+- *Use `stash_agent_library_overview` for library stats.*
+- *Search with `stash_agent_chat` for scenes matching …*
+
+#### Connect Claude Desktop
+
+1. Edit the Claude Desktop config:
+   - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+   - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - **Linux:** `~/.config/Claude/claude_desktop_config.json`
+2. Add the `stash` entry under `mcpServers` (see `mcp-config.claude-desktop.json`).
+3. Fully quit and restart Claude Desktop.
+4. In a new chat, open the tools menu — **stash** tools should be listed.
+
+#### Connect OpenClaw
+
+OpenClaw uses the same **stdio** MCP pattern:
+
+1. Open your OpenClaw MCP / gateway configuration.
+2. Add server **stash** with:
+   - **Command:** `python` (or absolute path to Stash’s Python)
+   - **Args:** absolute path to `stash_mcp_server.py`
+   - **Env:** `STASH_GRAPHQL_URL`, optional `STASH_API_KEY`
+3. Restart the gateway and ask the agent to use Stash tools.
+
+See `mcp-config.openclaw.json` for a JSON starting point (field names may vary by OpenClaw version).
+
+#### Other MCP clients
+
+For Windsurf, Cline, Zed, or any MCP-capable client:
+
+1. Add a **stdio** / **local command** MCP server.
+2. Use the [universal configuration](#universal-mcp-configuration) above.
+3. Reload the client and verify `stash_*` tools appear.
+
+#### MCP tools reference
+
+| Tool | Purpose |
+|------|---------|
+| `stash_rebuild_agent_index` | Full library scan → `agent_library.db` |
+| `stash_agent_library_overview` | Index stats and samples |
+| `stash_agent_chat` | Natural-language query against the local index |
+| `stash_agent_search_index` | Direct index search |
+| `stash_search_scenes` | Live GraphQL scene search |
+| `stash_get_scene` | Single scene (live GraphQL) |
+| `stash_update_scene` | Edit scene (tags, performers, studio, rating, …) |
+| `stash_search_tags` / `stash_search_performers` / `stash_search_studios` | Entity search |
+| `stash_get_library_stats` | Scene count / base URL |
+| `stash_list_duplicate_groups` | Read `duplicates_report.json` (after duplicate scan) |
+
+**Recommended agent workflow:**
+
+1. After large library changes → `stash_rebuild_agent_index`
+2. Search / Q&A → `stash_agent_chat` or `stash_agent_search_index`
+3. Edits → `stash_get_scene` then `stash_update_scene`  
+   Use `tag_mode` / `performer_mode` **`add`** to extend metadata. With **`set`**, send the **full** tag/performer ID lists (Stash replaces lists on `set`).
+
+#### Plugin tasks (MCP-related)
+
+These modes are passed to `smart_dashboard.py` from the UI or Stash plugin runner:
+
+| Task | Purpose |
+|------|---------|
+| `setup_agent` | Install `requirements-agent.txt` |
+| `build_agent_index` | Rebuild `agent_library.db` |
+| `agent_query` | Synchronous chat reply (used by MCP UI) |
+| `agent_index_stats` | Read index statistics |
+
+#### MCP environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `STASH_GRAPHQL_URL` | GraphQL endpoint (default `http://localhost:9999/graphql`) |
+| `STASH_API_KEY` | Optional Stash API key |
+| `STASH_AGENT_INDEX_DB` | Override path to `agent_library.db` |
+| `STASH_AGENT_INDEX_REPORT` | Override path to `agent_index_report.json` |
+
+#### MCP troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `Missing dependency 'mcp'` | `pip install -r requirements-agent.txt` |
+| MCP server won’t start | Use **absolute** path to `stash_mcp_server.py`; same Python as Stash |
+| No tools in AI client | Restart client; validate JSON; check MCP server logs |
+| GraphQL errors | Stash running? Correct `STASH_GRAPHQL_URL`? API key? |
+| Empty agent answers | Run index build: UI scan or `stash_rebuild_agent_index` |
+| Tags cleared on update | Use `tag_mode: "add"`; with `set`, include all IDs |
+
+**Privacy:** MCP server and `agent_library.db` stay on your machine. Your AI provider’s privacy policy applies to anything you send in chat.
+
+#### MCP checklist
+
+- [ ] Stash running  
+- [ ] `requirements-agent.txt` installed  
+- [ ] `agent_library.db` built  
+- [ ] MCP config uses absolute path to `stash_mcp_server.py`  
+- [ ] `STASH_GRAPHQL_URL` correct  
+- [ ] AI client restarted  
+- [ ] `stash_*` tools visible  
+
+> **Deutsch:** Kurzfassung der Verbindungsanleitung auch in [MCP_AGENT_CONNECT.md](MCP_AGENT_CONNECT.md) (verweist auf diesen Abschnitt).
+
+### HTTP API (REST-style)
+
+For scripts or agents **without** MCP:
+
+```bash
+pip install -r requirements-agent.txt
+python stash_http_server.py
+```
+
+Default: `http://127.0.0.1:8765`
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Health check |
+| GET | `/v1/library/stats` | Scene count |
+| GET | `/v1/scenes?q=...&tag=...&performer=...&studio=...` | Search scenes |
+| GET | `/v1/scenes/{id}` | Scene details |
+| POST | `/v1/scenes/{id}/update` | JSON body: `tag_names`, `performer_names`, `studio_name`, `rating100`, … |
+| GET | `/v1/tags`, `/v1/performers`, `/v1/studios` | Search entities |
+| GET | `/v1/duplicates` | Read `duplicates_report.json` |
+
+Optional auth: set `STASH_AGENT_HTTP_TOKEN` and send `Authorization: Bearer <token>`.
+
+HTTP-only environment variables: `STASH_AGENT_HTTP_HOST`, `STASH_AGENT_HTTP_PORT`, `STASH_AGENT_HTTP_TOKEN` (plus `STASH_GRAPHQL_URL`, `STASH_API_KEY`).
 
 ## Configuration
 
