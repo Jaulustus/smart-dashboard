@@ -17,17 +17,19 @@ _MESSAGES: Dict[str, Dict[str, str]] = {
     "en": {
         "plugin.ready": (
             "Smart Dashboard plugin ready. Known tasks: "
-            "setup, setup_agent, build_agent_index, agent_query, agent_index_stats, "
+            "setup, setup_agent, build_agent_index, agent_query, agent_deps_check, agent_index_stats, "
             "smart_dup_scan, smart_dash_calc, open_dashboard, cleanup_short."
         ),
         "plugin.done": "Smart Dashboard task completed.",
         "plugin.error": "Smart Dashboard error: {error}",
         "task.unknown": "Unknown task: {task}",
         "setup.done": "Setup complete: Python dependencies installed.",
+        "setup.skipped": "Dashboard dependencies are already installed — nothing to do.",
         "setup_agent.done": (
             "MCP setup complete: agent dependencies installed (requests, mcp). "
             "Configure MCP clients with stash_mcp_server.py."
         ),
+        "setup_agent.skipped": "MCP agent dependencies are already installed — nothing to do.",
         "dashboard.open": (
             "Dashboard: {url} | If no data appears yet, refresh recommendations in Cinematic first."
         ),
@@ -47,17 +49,19 @@ _MESSAGES: Dict[str, Dict[str, str]] = {
     "de": {
         "plugin.ready": (
             "Smart-Dashboard-Plugin bereit. Bekannte Tasks: "
-            "setup, setup_agent, build_agent_index, agent_query, agent_index_stats, "
+            "setup, setup_agent, build_agent_index, agent_query, agent_deps_check, agent_index_stats, "
             "smart_dup_scan, smart_dash_calc, open_dashboard, cleanup_short."
         ),
         "plugin.done": "Smart-Dashboard-Aufgabe abgeschlossen.",
         "plugin.error": "Smart-Dashboard-Fehler: {error}",
         "task.unknown": "Unbekannter Task: {task}",
         "setup.done": "Setup abgeschlossen: Python-Abhängigkeiten wurden installiert.",
+        "setup.skipped": "Dashboard-Abhängigkeiten sind bereits installiert — keine Installation nötig.",
         "setup_agent.done": (
             "MCP-Setup abgeschlossen: Agent-Abhängigkeiten installiert (requests, mcp). "
             "MCP-Clients mit stash_mcp_server.py konfigurieren."
         ),
+        "setup_agent.skipped": "MCP-Agent-Abhängigkeiten sind bereits installiert — keine Installation nötig.",
         "dashboard.open": (
             "Dashboard: {url} | Falls noch keine Daten angezeigt werden, "
             "starte zuerst die Empfehlungen in Cinematic neu."

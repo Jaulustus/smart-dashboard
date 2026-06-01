@@ -20,6 +20,7 @@ class AgentConfig:
     duplicates_report: Path
     agent_index_db: Path
     agent_index_report: Path
+    stash_sqlite_path: Optional[Path]
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -46,6 +47,8 @@ class AgentConfig:
         duplicates_report = Path(report) if report else PLUGIN_DIR / "duplicates_report.json"
         index_db = os.environ.get("STASH_AGENT_INDEX_DB")
         index_report = os.environ.get("STASH_AGENT_INDEX_REPORT")
+        sqlite_path = os.environ.get("STASH_SQLITE_PATH") or os.environ.get("STASH_DATABASE_PATH")
+        stash_sqlite = Path(sqlite_path).expanduser() if sqlite_path else None
 
         return cls(
             graphql_url=graphql_url.replace("://0.0.0.0", "://localhost"),
@@ -56,6 +59,7 @@ class AgentConfig:
             duplicates_report=duplicates_report,
             agent_index_db=Path(index_db) if index_db else PLUGIN_DIR / "agent_library.db",
             agent_index_report=Path(index_report) if index_report else PLUGIN_DIR / "agent_index_report.json",
+            stash_sqlite_path=stash_sqlite,
         )
 
     @property

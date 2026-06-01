@@ -1,3 +1,11 @@
 recommendations.json
 agent_library.db
 agent_index_report.json
+vendor/
+setup_status.json
+setup_log.txt
+scan_progress.json
+mcp_paths.json
+agent_ui_snapshot.json
+install_state.json
+setup_log_snapshot.json

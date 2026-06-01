@@ -1,6 +1,6 @@
 name: "Smart Dashboard & Advanced Duplicate Finder"
-description: "AI-powered duplicate finder (pHash) and local recommendation engine for the dashboard."
-version: "0.2.0"
+description: "Cinematic-Dashboard, pHash-Duplikatsuche, lokale Empfehlungen und MCP-Agent für KI-Tools (Cursor, Claude Desktop, OpenClaw). — Cinematic dashboard, duplicate finder, recommendations, and MCP agent for your Stash library."
+version: "0.3.0"
 url: "https://github.com/Jaulustus/smart-dashboard"
 
 exec:
@@ -9,6 +9,23 @@ exec:
 
 interface: raw
 
+tasks:
+  - name: Install dashboard dependencies
+    description: Installs dashboard Python packages into the plugin folder (runs automatically on first load).
+    defaultArgs:
+      task: setup
+      mode: setup
+  - name: Install MCP agent dependencies
+    description: Installs MCP agent packages into vendor/ (runs automatically in the background).
+    defaultArgs:
+      task: setup_agent
+      mode: setup_agent
+  - name: Build agent library index
+    description: Scans your Stash library into agent_library.db for the MCP agent.
+    defaultArgs:
+      task: build_agent_index
+      mode: build_agent_index
+
 ui:
   javascript:
     - smart_dashboard_i18n.js
@@ -16,4 +33,4 @@ ui:
   css:
     - smart_dashboard.css
   assets:
-    /: .
+    root: "."

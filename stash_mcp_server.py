@@ -7,7 +7,7 @@ Configure in Cursor / OpenClaw / Claude Desktop, e.g.:
     "mcpServers": {
       "stash": {
         "command": "python",
-        "args": ["C:/stash/plugins/local/smart-dashboard/stash_mcp_server.py"],
+        "args": ["REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR/stash_mcp_server.py"],
         "env": {
           "STASH_GRAPHQL_URL": "http://localhost:9999/graphql",
           "STASH_API_KEY": "your-api-key-if-set"
@@ -24,7 +24,17 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any, List, Optional
+
+_PLUGIN_DIR = Path(__file__).resolve().parent
+_VENDOR_DIR = _PLUGIN_DIR / "vendor"
+if _VENDOR_DIR.is_dir():
+    vendor = str(_VENDOR_DIR.resolve())
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
 
 try:
     from mcp.server.fastmcp import FastMCP

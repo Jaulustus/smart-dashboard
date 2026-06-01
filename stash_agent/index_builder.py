@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import sys
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+ProgressCallback = Optional[Callable[[str], None]]
 
 from stash_agent.client import StashAgentClient, StashAgentError
 from stash_agent.config import AgentConfig
@@ -89,6 +93,8 @@ def _paginate_entities(
     container_key: str,
     list_key: str,
     per_page: int = 500,
+    on_progress: ProgressCallback = None,
+    progress_label: str = "",
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     page = 1
@@ -100,10 +106,32 @@ def _paginate_entities(
             break
         items.extend(item for item in page_items if isinstance(item, dict))
         count = container.get("count")
+        if on_progress and progress_label and (page == 1 or page % 5 == 0 or not page_items):
+            total = int(count) if isinstance(count, int) else None
+            if total:
+                _report_progress(
+                    on_progress,
+                    f"GraphQL {progress_label}: {len(items)} / {total} geladen …",
+                )
+            else:
+                _report_progress(on_progress, f"GraphQL {progress_label}: {len(items)} geladen …")
         if not page_items or (isinstance(count, int) and len(items) >= count) or len(page_items) < per_page:
             break
         page += 1
     return items
+
+
+def _log_index_fallback(message: str) -> None:
+    print(f"[Smart Dashboard Agent] {message}", file=sys.stderr, flush=True)
+
+
+def _report_progress(on_progress: ProgressCallback, message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    _log_index_fallback(text)
+    if on_progress:
+        on_progress(text)
 
 
 def build_agent_index(
@@ -111,20 +139,77 @@ def build_agent_index(
     store: AgentIndexStore,
     config: AgentConfig,
     report_path: Optional[Any] = None,
+    stash_sqlite_hints: Optional[Sequence[Path]] = None,
+    on_progress: ProgressCallback = None,
 ) -> Dict[str, Any]:
+    from stash_agent.stash_db_source import (
+        StashSqliteError,
+        build_agent_index_from_stash_sqlite,
+        resolve_stash_sqlite_path,
+    )
+
     base = config.stash_base_url.rstrip("/")
-    scenes = _paginate_entities(client, FIND_SCENES_INDEX_QUERY, "findScenes", "scenes")
-    tags = _paginate_entities(client, FIND_TAGS_INDEX_QUERY, "findTags", "tags")
-    performers = _paginate_entities(client, FIND_PERFORMERS_INDEX_QUERY, "findPerformers", "performers")
-    studios = _paginate_entities(client, FIND_STUDIOS_INDEX_QUERY, "findStudios", "studios")
+    try:
+        store.begin_build(stash_base_url=base, index_source="pending")
+        _report_progress(on_progress, f"agent_library.db angelegt: {store.db_path}")
+    except OSError as exc:
+        raise StashAgentError(f"Cannot create agent_library.db: {exc}") from exc
+
+    sqlite_path = resolve_stash_sqlite_path(stash_sqlite_hints)
+    if sqlite_path:
+        _report_progress(on_progress, f"Stash-Datenbank gefunden: {sqlite_path}")
+        try:
+            return build_agent_index_from_stash_sqlite(
+                sqlite_path,
+                store,
+                config,
+                report_path=report_path,
+                on_progress=on_progress,
+            )
+        except StashSqliteError as exc:
+            _report_progress(on_progress, f"Stash-SQLite-Index fehlgeschlagen, nutze GraphQL: {exc}")
+        except Exception as exc:
+            _report_progress(on_progress, f"Stash-SQLite-Index Fehler, nutze GraphQL: {exc}")
+    else:
+        _report_progress(
+            on_progress,
+            "stash-go.sqlite nicht gefunden — Index wird per GraphQL aufgebaut (langsamer).",
+        )
+
+    base = config.stash_base_url.rstrip("/")
+    _report_progress(on_progress, "Lade Metadaten per GraphQL von Stash …")
+    scenes = _paginate_entities(
+        client, FIND_SCENES_INDEX_QUERY, "findScenes", "scenes", on_progress=on_progress, progress_label="Szenen"
+    )
+    _report_progress(on_progress, f"GraphQL: {len(scenes)} Szenen geladen.")
+    tags = _paginate_entities(
+        client, FIND_TAGS_INDEX_QUERY, "findTags", "tags", on_progress=on_progress, progress_label="Tags"
+    )
+    _report_progress(on_progress, f"GraphQL: {len(tags)} Tags geladen.")
+    performers = _paginate_entities(
+        client,
+        FIND_PERFORMERS_INDEX_QUERY,
+        "findPerformers",
+        "performers",
+        on_progress=on_progress,
+        progress_label="Performer",
+    )
+    _report_progress(on_progress, f"GraphQL: {len(performers)} Performer geladen.")
+    studios = _paginate_entities(
+        client, FIND_STUDIOS_INDEX_QUERY, "findStudios", "studios", on_progress=on_progress, progress_label="Studios"
+    )
+    _report_progress(on_progress, f"GraphQL: {len(studios)} Studios geladen.")
+    _report_progress(on_progress, f"Schreibe agent_library.db ({store.db_path}) …")
 
     with store.connect() as connection:
         store.initialize_schema(connection)
         store.clear(connection)
         store.set_meta(connection, "generated_at", _utc_now_iso())
         store.set_meta(connection, "stash_base_url", base)
+        store.set_meta(connection, "index_source", "graphql")
         store.set_meta(connection, "graphql_query_variant", "agent_index_v1")
 
+        written = 0
         for scene in scenes:
             scene_id = str(scene.get("id", ""))
             if not scene_id:
@@ -152,6 +237,9 @@ def build_agent_index(
                     "thumbnail": paths.get("screenshot"),
                 },
             )
+            written += 1
+            if written % 5000 == 0:
+                _report_progress(on_progress, f"… {written} / {len(scenes)} Szenen in agent_library.db geschrieben")
 
         store.insert_entity_rows(connection, "tags", _entity_rows(tags))
         store.insert_entity_rows(connection, "performers", _entity_rows(performers))
@@ -159,14 +247,20 @@ def build_agent_index(
         connection.commit()
 
     stats = store.get_stats()
+    _report_progress(
+        on_progress,
+        f"GraphQL-Index fertig: {stats['scene_count']} Szenen, {stats['tag_count']} Tags, "
+        f"{stats['performer_count']} Performer, {stats['studio_count']} Studios.",
+    )
     result = {
         "message": (
-            f"Agent library index built: {stats['scene_count']} scenes, "
+            f"Agent library index built via GraphQL: {stats['scene_count']} scenes, "
             f"{stats['tag_count']} tags, {stats['performer_count']} performers, "
             f"{stats['studio_count']} studios."
         ),
         "index": stats,
         "db_path": str(store.db_path),
+        "index_source": "graphql",
     }
     if report_path is not None:
         store.write_build_report(report_path, result)

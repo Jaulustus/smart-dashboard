@@ -70,6 +70,17 @@ class AgentIndexStore:
             """
         )
 
+    def begin_build(self, *, stash_base_url: str, index_source: str = "pending") -> None:
+        """Create agent_library.db immediately so long-running scans show a file on disk."""
+        with self.connect() as connection:
+            self.initialize_schema(connection)
+            self.clear(connection)
+            self.set_meta(connection, "generated_at", _utc_now_iso())
+            self.set_meta(connection, "stash_base_url", stash_base_url)
+            self.set_meta(connection, "index_source", index_source)
+            self.set_meta(connection, "build_status", "in_progress")
+            connection.commit()
+
     def clear(self, connection: sqlite3.Connection) -> None:
         connection.executescript(
             """
@@ -168,6 +179,8 @@ class AgentIndexStore:
                 "generated_at": self.get_meta(connection, "generated_at"),
                 "stash_base_url": self.get_meta(connection, "stash_base_url"),
                 "graphql_query_variant": self.get_meta(connection, "graphql_query_variant"),
+                "index_source": self.get_meta(connection, "index_source"),
+                "stash_sqlite_path": self.get_meta(connection, "stash_sqlite_path"),
                 "scene_count": int(scene_count),
                 "tag_count": int(tag_count),
                 "performer_count": int(performer_count),
