@@ -9,8 +9,8 @@ Configure in Cursor / OpenClaw / Claude Desktop, e.g.:
         "command": "python",
         "args": ["REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR/stash_mcp_server.py"],
         "env": {
-          "STASH_GRAPHQL_URL": "http://localhost:9999/graphql",
-          "STASH_API_KEY": "your-api-key-if-set"
+          "STASH_GRAPHQL_URL": "REPLACE_WITH_STASH_GRAPHQL_URL",
+          "STASH_API_KEY": "REPLACE_WITH_STASH_API_KEY"
         }
       }
     }

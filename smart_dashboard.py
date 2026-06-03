@@ -420,10 +420,19 @@ def write_scan_progress(
 
 
 def clear_scan_progress() -> None:
+    """Leave an empty JSON file so /assets/scan_progress.json returns 200 when idle."""
     try:
-        SCAN_PROGRESS_FILE.unlink(missing_ok=True)
+        write_json_file(SCAN_PROGRESS_FILE, {})
     except OSError:
-        pass
+        try:
+            SCAN_PROGRESS_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def ensure_idle_scan_progress_asset() -> None:
+    if not SCAN_PROGRESS_FILE.is_file():
+        clear_scan_progress()
 
 
 def _scene_counts_from_progress_message(message: str) -> tuple[int, Optional[int]]:
@@ -600,6 +609,7 @@ def _agent_db_ready_quick() -> Tuple[bool, int]:
         return False, 0
     try:
         with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
             row = connection.execute("SELECT COUNT(*) AS c FROM scenes").fetchone()
             count = int(row["c"] if row else 0)
             return count > 0, count
@@ -624,16 +634,42 @@ def detect_install_state(payload: Optional[Dict[str, Any]] = None) -> Dict[str, 
     index_ready = db_ready
     if db_ready:
         try:
-            from stash_agent.config import AgentConfig
             from stash_agent.index_store import AgentIndexStore
 
-            index_stats = AgentIndexStore(AgentConfig.from_env().agent_index_db).get_stats()
+            # Always treat the plugin-local agent_library.db as canonical.
+            index_stats = AgentIndexStore(PLUGIN_DIR / "agent_library.db").get_stats()
             index_ready = bool(index_stats.get("ready") and int(index_stats.get("scene_count") or 0) > 0)
             scene_count = int(index_stats.get("scene_count") or scene_count)
         except Exception:
             index_ready = scene_count > 0
 
     dashboard_deps = check_dashboard_python_deps()
+    dashboard_deps_ready = bool(dashboard_deps.get("all_ready"))
+
+    missing: List[str] = []
+    if not dashboard_deps_ready:
+        missing.append("dashboard_deps")
+    if not mcp_deps_ready:
+        missing.append("mcp_deps")
+    # db/index are different: db can exist but be empty or stale.
+    if not (PLUGIN_DIR / "agent_library.db").is_file():
+        missing.append("agent_library_db")
+    if not index_ready:
+        missing.append("agent_index")
+
+    plugin_db_path = PLUGIN_DIR / "agent_library.db"
+    plugin_db_exists = plugin_db_path.is_file()
+    plugin_db_size_bytes = int(plugin_db_path.stat().st_size) if plugin_db_exists else 0
+
+    if not mcp_deps_ready:
+        recommended = "setup_agent"
+    elif not index_ready:
+        recommended = "build_agent_index"
+    elif not dashboard_deps_ready:
+        recommended = "setup"
+    else:
+        recommended = "none"
+
     return {
         "install_basis": "disk",
         "recorded_plugin_version": PLUGIN_VERSION,
@@ -641,18 +677,27 @@ def detect_install_state(payload: Optional[Dict[str, Any]] = None) -> Dict[str, 
         "mcp_deps_ready": mcp_deps_ready,
         "index_ready": index_ready,
         "index_scene_count": scene_count,
-        "dashboard_deps_ready": bool(dashboard_deps.get("all_ready")),
+        "dashboard_deps_ready": dashboard_deps_ready,
         "vendor_path": str(VENDOR_DIR) if VENDOR_DIR.is_dir() else None,
-        "agent_library_db": str(PLUGIN_DIR / "agent_library.db"),
-        "index": index_stats if index_ready else {},
+        "agent_library_db": str(plugin_db_path),
+        "agent_library_db_exists": plugin_db_exists,
+        "agent_library_db_size_bytes": plugin_db_size_bytes,
+        "index": index_stats if index_ready else (index_stats if plugin_db_exists and index_stats else {}),
+        "missing": missing,
+        "recommended_task": recommended,
     }
 
 
 def write_install_state(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     state = detect_install_state(payload)
+    ensure_idle_scan_progress_asset()
     try:
         write_json_file(INSTALL_STATE_FILE, state)
     except OSError:
+        pass
+    try:
+        build_mcp_config_payload(payload)
+    except Exception:
         pass
     return state
 
@@ -989,24 +1034,42 @@ def write_agent_ui_snapshot(payload: Optional[Dict[str, Any]] = None) -> None:
         pass
 
 
-def write_mcp_paths_hint(
-    *,
-    mcp_server_path: Optional[str] = None,
-    python_path: Optional[str] = None,
-    graphql_url: Optional[str] = None,
-) -> None:
-    """Write a small JSON hint for the UI when runPluginOperation is unavailable."""
+def mcp_config_for_disk_export(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip secrets before writing mcp_paths.json (gitignored runtime file, not for GitHub)."""
+    import copy
+
+    out = copy.deepcopy(config)
+    stash = out.get("mcpServers", {}).get("stash")
+    if isinstance(stash, dict):
+        env = stash.get("env")
+        if isinstance(env, dict):
+            env["STASH_API_KEY"] = ""
+    return out
+
+
+def persist_mcp_config_for_ui(built: Dict[str, Any]) -> None:
+    """Runtime hint for the MCP UI (paths/URL from this Stash instance; no API key on disk)."""
     try:
-        resolved_mcp = mcp_server_path or str((PLUGIN_DIR / "stash_mcp_server.py").resolve())
-        payload = {
+        disk_config = built.get("mcp_config")
+        if isinstance(disk_config, dict):
+            disk_config_json = json.dumps(
+                mcp_config_for_disk_export(disk_config),
+                ensure_ascii=False,
+                indent=2,
+            )
+        else:
+            disk_config_json = built.get("mcp_config_json") or ""
+        file_payload: Dict[str, Any] = {
             "plugin_dir": str(PLUGIN_DIR.resolve()),
-            "mcp_server_path": resolved_mcp,
-            "python_path": str(python_path or "python"),
-            "graphql_url": graphql_url or DEFAULT_STASH_GRAPHQL_URL,
-            "updated_at": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "mcp_server_path": built.get("mcp_server_path"),
+            "python_path": built.get("python_path"),
+            "graphql_url": built.get("graphql_url"),
+            "api_key_configured": bool(built.get("api_key_configured")),
+            "mcp_config_json": disk_config_json,
+            "updated_at": utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         }
         MCP_PATHS_HINT_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            json.dumps(file_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError:
@@ -1033,12 +1096,7 @@ def build_mcp_config_payload(payload: Optional[Dict[str, Any]] = None) -> Dict[s
             }
         }
     }
-    write_mcp_paths_hint(
-        mcp_server_path=mcp_server_path,
-        python_path=str(python_path or "python"),
-        graphql_url=graphql_url,
-    )
-    return {
+    result = {
         "graphql_url": graphql_url,
         "api_key": api_key,
         "api_key_configured": bool(api_key),
@@ -1048,6 +1106,8 @@ def build_mcp_config_payload(payload: Optional[Dict[str, Any]] = None) -> Dict[s
         "mcp_config": config,
         "mcp_config_json": json.dumps(config, ensure_ascii=False, indent=2),
     }
+    persist_mcp_config_for_ui(result)
+    return result
 
 
 def run_agent_mcp_config(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1093,11 +1153,9 @@ def _prepare_agent_index_shell_if_missing(payload: Dict[str, Any], deps: Dict[st
     """Create an empty agent_library.db as soon as MCP deps are ready (before the full scan task)."""
     if not deps.get("all_ready"):
         return
-    from stash_agent.config import AgentConfig
     from stash_agent.index_store import AgentIndexStore
 
-    config = AgentConfig.from_env()
-    store = AgentIndexStore(config.agent_index_db)
+    store = AgentIndexStore(PLUGIN_DIR / "agent_library.db")
     if store.db_path.is_file() and store.db_path.stat().st_size > 0:
         return
     try:
@@ -1125,10 +1183,11 @@ def run_agent_deps_check(payload: Optional[Dict[str, Any]] = None) -> Dict[str, 
     ensure_setup_log_snapshot(agent_deps)
     _prepare_agent_index_shell_if_missing(payload, agent_deps)
 
-    stats = AgentIndexStore(AgentConfig.from_env().agent_index_db).get_stats()
-    db_path = Path(str(stats.get("db_path") or PLUGIN_DIR / "agent_library.db"))
-    db_exists = db_path.is_file()
-    db_size_bytes = int(db_path.stat().st_size) if db_exists else 0
+    stats = AgentIndexStore(PLUGIN_DIR / "agent_library.db").get_stats()
+    # Always report the physical file in the plugin directory as the canonical MCP DB location.
+    plugin_db_path = PLUGIN_DIR / "agent_library.db"
+    plugin_db_exists = plugin_db_path.is_file()
+    plugin_db_size_bytes = int(plugin_db_path.stat().st_size) if plugin_db_exists else 0
 
     result = {
         "message": msg(None, "agent_index.stats"),
@@ -1140,9 +1199,9 @@ def run_agent_deps_check(payload: Optional[Dict[str, Any]] = None) -> Dict[str, 
         "environment": {
             "deps": agent_deps,
             "dashboard_deps": check_dashboard_python_deps(),
-            "db_exists": db_exists,
-            "db_size_bytes": db_size_bytes,
-            "db_path": str(db_path),
+            "db_exists": plugin_db_exists,
+            "db_size_bytes": plugin_db_size_bytes,
+            "db_path": str(plugin_db_path),
             "stash_sqlite": _stash_sqlite_status(payload, probe_db=True),
             "stash_config_dir": str(get_stash_config_dir(payload) or ""),
             "index_source": stats.get("index_source"),
@@ -1155,15 +1214,15 @@ def run_agent_deps_check(payload: Optional[Dict[str, Any]] = None) -> Dict[str, 
 
 
 def run_agent_index_stats(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    from stash_agent.config import AgentConfig
     from stash_agent.index_store import AgentIndexStore
 
     payload = payload or {}
     quick = _is_quick_check(payload)
-    stats = AgentIndexStore(AgentConfig.from_env().agent_index_db).get_stats()
-    db_path = Path(str(stats.get("db_path") or PLUGIN_DIR / "agent_library.db"))
-    db_exists = db_path.is_file()
-    db_size_bytes = int(db_path.stat().st_size) if db_exists else 0
+    stats = AgentIndexStore(PLUGIN_DIR / "agent_library.db").get_stats()
+    # Always check the plugin-local agent_library.db (Stash does not persist plugin memory across reloads).
+    plugin_db_path = PLUGIN_DIR / "agent_library.db"
+    plugin_db_exists = plugin_db_path.is_file()
+    plugin_db_size_bytes = int(plugin_db_path.stat().st_size) if plugin_db_exists else 0
 
     result = {
         "message": msg(None, "agent_index.stats"),
@@ -1174,9 +1233,9 @@ def run_agent_index_stats(payload: Optional[Dict[str, Any]] = None) -> Dict[str,
         "environment": {
             "deps": check_agent_python_deps(payload),
             "dashboard_deps": check_dashboard_python_deps(),
-            "db_exists": db_exists,
-            "db_size_bytes": db_size_bytes,
-            "db_path": str(db_path),
+            "db_exists": plugin_db_exists,
+            "db_size_bytes": plugin_db_size_bytes,
+            "db_path": str(plugin_db_path),
             "stash_sqlite": _stash_sqlite_status(payload, probe_db=not quick),
             "stash_config_dir": str(get_stash_config_dir(payload) or ""),
             "index_source": stats.get("index_source"),
@@ -1198,6 +1257,22 @@ def run_build_agent_index(
     from stash_agent.index_builder import build_agent_index
     from stash_agent.index_store import AgentIndexStore
 
+    if _index_already_complete():
+        store = AgentIndexStore(PLUGIN_DIR / "agent_library.db")
+        stats = store.get_stats()
+        append_setup_log_once(
+            f"Bibliotheks-Index bereits vorhanden ({int(stats.get('scene_count') or 0)} Szenen) — Scan uebersprungen.",
+            marker="Bibliotheks-Index bereits vorhanden",
+        )
+        clear_scan_progress()
+        write_install_state(payload)
+        return {
+            "message": "Agent index already built",
+            "skipped": True,
+            "index": stats,
+            "scene_count": int(stats.get("scene_count") or 0),
+        }
+
     graphql_url = client.url
     api_key = client.headers.get("ApiKey")
     if graphql_url:
@@ -1207,7 +1282,8 @@ def run_build_agent_index(
 
     config = AgentConfig.from_env()
     agent_client = StashAgentClient(graphql_url, str(api_key) if api_key else None)
-    store = AgentIndexStore(config.agent_index_db)
+    # Always build into the plugin-local agent_library.db so the MCP UI sees it immediately.
+    store = AgentIndexStore(PLUGIN_DIR / "agent_library.db")
     stash_base_url = stash_base_url_from_graphql_url(graphql_url)
     hints = _stash_sqlite_hints_from_payload(payload)
 
@@ -1349,10 +1425,9 @@ def _setup_agent_skip_response(
 
 def _index_already_complete() -> bool:
     try:
-        from stash_agent.config import AgentConfig
         from stash_agent.index_store import AgentIndexStore
 
-        stats = AgentIndexStore(AgentConfig.from_env().agent_index_db).get_stats()
+        stats = AgentIndexStore(PLUGIN_DIR / "agent_library.db").get_stats()
         return bool(stats.get("ready") and int(stats.get("scene_count") or 0) > 0)
     except Exception:
         return False
@@ -3044,14 +3119,23 @@ def error_response(exc: Exception, language: Optional[str] = None) -> Dict[str, 
 
 def main() -> None:
     payload = read_stash_payload()
-    write_mcp_paths_hint(
-        python_path=str(resolve_python_executable(payload) or "python"),
-        graphql_url=get_graphql_url(payload),
-    )
     try:
+        build_mcp_config_payload(payload)
+    except Exception:
+        pass
+    try:
+        # Ensure UI assets exist even before the first real task writes logs.
+        try:
+            PLUGIN_LOG_FILE.touch(exist_ok=True)
+        except OSError:
+            pass
+        # Keep install_state + log snapshots in sync for HTTP polling.
         reconcile_install_state(payload)
-        if PLUGIN_LOG_FILE.is_file():
-            refresh_setup_log_snapshot()
+        try:
+            write_install_state(payload)
+        except Exception:
+            pass
+        refresh_setup_log_snapshot()
     except Exception:
         pass
     task = detect_task(sys.argv[1:], payload)

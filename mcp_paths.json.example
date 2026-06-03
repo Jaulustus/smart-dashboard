@@ -1,0 +1,9 @@
+{
+  "plugin_dir": "/path/to/your/stash/plugins/community/smart-dashboard",
+  "mcp_server_path": "/path/to/your/stash/plugins/community/smart-dashboard/stash_mcp_server.py",
+  "python_path": "python",
+  "graphql_url": "http://YOUR_STASH_HOST:9999/graphql",
+  "api_key_configured": true,
+  "mcp_config_json": "{\n  \"mcpServers\": {\n    \"stash\": {\n      \"command\": \"python\",\n      \"args\": [\n        \"/path/to/.../stash_mcp_server.py\"\n      ],\n      \"env\": {\n        \"STASH_GRAPHQL_URL\": \"http://YOUR_STASH_HOST:9999/graphql\",\n        \"STASH_API_KEY\": \"\"\n      }\n    }\n  }\n}",
+  "updated_at": "generated-at-runtime-by-plugin"
+}

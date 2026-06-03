@@ -1,6 +1,8 @@
 recommendations.json
 agent_library.db
 agent_index_report.json
+duplicates_report.json
+cache.db
 vendor/
 setup_status.json
 setup_log.txt
@@ -9,3 +11,5 @@ mcp_paths.json
 agent_ui_snapshot.json
 install_state.json
 setup_log_snapshot.json
+__pycache__/
+*.pyc

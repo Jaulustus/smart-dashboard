@@ -6,9 +6,13 @@
   const AGENT_DEPS_CHECK_MODE = "agent_deps_check";
   const AGENT_SETUP_LOG_MODE = "agent_setup_log";
   const AGENT_MCP_CONFIG_MODE = "agent_mcp_config";
+  const AGENT_INSTALL_STATE_MODE = "agent_install_state";
   const MCP_LOG_POLL_MS = 2500;
   const MCP_DEPS_POLL_MS = 8000;
   const PLUGIN_OP_TIMEOUT_MS = 45000;
+  // The UI log panel under the MCP chat caused confusion and can be noisy.
+  // Keep backend logging, but hide this UI panel by default.
+  const SHOW_MCP_CHAT_LOG_PANEL = false;
   const MCP_SETUP_AUTOSTART_KEY = "smart_dashboard_agent_setup_queued";
   const MCP_AUTO_SCAN_KEY = "smart_dashboard_mcp_auto_scan";
   const INDEX_AUTOSTART_KEY = "smart_dashboard_agent_index_queued";
@@ -20,9 +24,21 @@
   const AGENT_QUERY_MODE = "agent_query";
   const AGENT_INDEX_STATS_MODE = "agent_index_stats";
   const MCP_SETUP_KEY = "smart_dashboard_mcp_setup_done";
+  const MCP_DISK_READY_KEY = "smart_dashboard_mcp_disk_ready";
+  /** Missing file is normal when no index build is running (Stash returns 404). */
+  const OPTIONAL_PLUGIN_ASSETS = new Set(["scan_progress.json"]);
   const RECOMMENDATIONS_MODE = "smart_dash_calc";
   const DUP_SCAN_MODE = "smart_dup_scan";
   const TASK_ONLY_MODES = new Set([SETUP_MODE, SETUP_AGENT_MODE, BUILD_AGENT_INDEX_MODE]);
+
+  function isMcpDashboardRoute() {
+    try {
+      const search = String(window.location && window.location.search ? window.location.search : "");
+      return search.includes(MCP_DASHBOARD_QUERY);
+    } catch (_error) {
+      return false;
+    }
+  }
 
   function stripSetupLogTimestamp(line) {
     return String(line || "")
@@ -66,6 +82,7 @@
       depsReady,
       setupOk,
       indexReady,
+      dbExists,
       scanBusy,
       setupBusy,
       stats,
@@ -76,36 +93,39 @@
     if (indexReady) {
       return 100;
     }
+
+    // 4 deterministic steps, each worth 25%.
+    // 1) deps ready, 2) setup ok, 3) DB exists, 4) index filled (progress-based).
+    const step1 = Boolean(depsReady);
+    const step2 = Boolean(setupOk);
+    const step3 = Boolean(dbExists);
+
     const progressScenes = Number((scanProgress && scanProgress.scene_count) || stats.scene_count) || 0;
     const progressTotal =
       Number((scanProgress && scanProgress.total_scenes) || stashSqlite.scene_count) || 0;
+
+    let step4Progress = 0;
     if (typeof mcpActivity.progress === "number" && mcpActivity.progress > 0) {
-      return Math.round(35 + Math.min(1, mcpActivity.progress) * 60);
+      // Used during queued Stash job polling.
+      step4Progress = Math.max(step4Progress, Math.min(1, mcpActivity.progress));
     }
-    let percent = 0;
-    if (depsReady) {
-      percent += 20;
-    }
-    if (setupOk) {
-      percent += 20;
-    }
-    if (scanBusy || mcpActivity.phase === "scan" || progressScenes > 0 || (scanProgress && scanProgress.phase)) {
-      percent = Math.max(percent, 45);
-      if (progressTotal > 0 && progressScenes > 0) {
-        percent = 40 + Math.round(Math.min(1, progressScenes / progressTotal) * 55);
-      } else if (progressScenes > 0) {
-        percent = Math.max(percent, 55);
-      } else {
-        percent = Math.max(percent, 48);
-      }
+    if (progressTotal > 0 && progressScenes > 0) {
+      step4Progress = Math.max(step4Progress, Math.min(1, progressScenes / progressTotal));
+    } else if (
+      scanBusy ||
+      mcpActivity.phase === "scan" ||
+      progressScenes > 0 ||
+      (scanProgress && scanProgress.phase)
+    ) {
+      // We know we're scanning but total is unknown.
+      step4Progress = Math.max(step4Progress, progressScenes > 0 ? 0.4 : 0.2);
     } else if (setupBusy || mcpActivity.phase === "setup") {
-      percent = Math.max(percent, depsReady ? 35 : 15);
-    } else if (!depsReady) {
-      percent = 8;
-    } else if (setupOk && !indexReady) {
-      percent = 45;
+      step4Progress = Math.max(step4Progress, 0.05);
     }
-    return Math.min(99, Math.max(5, percent));
+
+    const completed = (step1 ? 1 : 0) + (step2 ? 1 : 0) + (step3 ? 1 : 0);
+    const percent = completed * 25 + Math.round(step4Progress * 25);
+    return Math.min(99, Math.max(1, percent));
   }
   const RECOMMENDATIONS_AUTOSTART_KEY = "smart_dashboard_recommendations_autostarted";
   const RECOMMENDATIONS_MISSING_KEY = "smart_dashboard_recommendations_missing_at";
@@ -233,6 +253,14 @@
         }
       }
       if (value.setup_log !== undefined || value.setup_status !== undefined) {
+        return value;
+      }
+      if (
+        value.install_state ||
+        value.index_ready !== undefined ||
+        value.mcp_deps_ready !== undefined ||
+        value.recommended_task !== undefined
+      ) {
         return value;
       }
       if (value.reply || value.scenes || value.index || value.environment) {
@@ -415,6 +443,12 @@
     return normalized;
   }
 
+  async function fetchAgentInstallState() {
+    const hints = await agentPathHints();
+    const raw = await runPluginModeOperation(AGENT_INSTALL_STATE_MODE, hints);
+    return normalizePluginResult(raw);
+  }
+
   function isSmartDashboardPluginJob(job) {
     const text = String((job && job.description) || "").toLowerCase();
     return text.includes("smart dashboard");
@@ -463,21 +497,115 @@
     window.history.pushState({}, "", `${pluginBasePath()}/?${MCP_DASHBOARD_QUERY}`);
   }
 
-  function guessMcpServerPath(_general) {
-    return null;
+  const MCP_PLUGIN_FOLDER_CANDIDATES = [
+    "community/smart-dashboard",
+    "local/smart-dashboard",
+    "smart-dashboard",
+  ];
+
+  function guessMcpServerPath(general) {
+    const pluginsPath = general && general.pluginsPath;
+    if (!pluginsPath) {
+      return null;
+    }
+    const base = String(pluginsPath).replace(/\\/g, "/").replace(/\/$/, "");
+    const folder = MCP_PLUGIN_FOLDER_CANDIDATES[0];
+    return `${base}/${folder}/stash_mcp_server.py`;
+  }
+
+  function deriveMcpServerPathFromDbPath(dbPath) {
+    if (!dbPath) {
+      return null;
+    }
+    const normalized = String(dbPath).replace(/\\/g, "/");
+    const slash = normalized.lastIndexOf("/");
+    if (slash <= 0) {
+      return null;
+    }
+    return `${normalized.slice(0, slash)}/stash_mcp_server.py`;
+  }
+
+  function resolveMcpServerScriptPath(parts) {
+    if (parts && parts.mcp_server_path) {
+      return parts.mcp_server_path;
+    }
+    if (parts && parts.plugin_dir) {
+      const base = String(parts.plugin_dir).replace(/\\/g, "/").replace(/\/$/, "");
+      return `${base}/stash_mcp_server.py`;
+    }
+    const derived = deriveMcpServerPathFromDbPath(
+      (parts && parts.agent_library_db) ||
+        (parts && parts.index && parts.index.db_path)
+    );
+    if (derived) {
+      return derived;
+    }
+    return guessMcpServerPath(parts && parts.general);
+  }
+
+  function resolveMcpGraphqlUrl(preferred) {
+    const fromPage = `${window.location.origin.replace(/\/$/, "")}/graphql`;
+    if (!preferred) {
+      return fromPage;
+    }
+    try {
+      const pref = new URL(preferred);
+      const page = new URL(fromPage);
+      if (
+        (pref.hostname === "localhost" || pref.hostname === "127.0.0.1") &&
+        page.hostname !== pref.hostname
+      ) {
+        return fromPage;
+      }
+    } catch (_error) {
+      return fromPage;
+    }
+    return preferred;
   }
 
   let cachedMcpPathsHint = null;
+  // Stash serves "ui.assets" as static files; runtime-created files may not be exposed via /assets/.
+  // If we detect 404s, disable asset polling and fall back to GraphQL operations.
+  let pluginAssetsUnavailable = false;
 
-  async function fetchPluginAssetText(fileName) {
+  function disablePluginAssets() {
+    pluginAssetsUnavailable = true;
+  }
+
+  function isOptionalPluginAsset(fileName) {
+    return OPTIONAL_PLUGIN_ASSETS.has(fileName);
+  }
+
+  function noteAssetResponseStatus(status, fileName) {
+    if (status === 404 && !isOptionalPluginAsset(fileName)) {
+      pluginAssetsUnavailable = true;
+    }
+  }
+
+  async function fetchPluginAssetText(fileName, options) {
+    const force = Boolean(options && options.force);
+    if (!force && pluginAssetsUnavailable) {
+      return null;
+    }
     const cacheBust = `t=${Date.now()}`;
     const candidates = assetCandidates(fileName, cacheBust);
+    let saw404 = false;
     for (const url of candidates) {
       try {
         const response = await fetch(url, {
           cache: "no-store",
           credentials: "same-origin",
         });
+        noteAssetResponseStatus(response.status, fileName);
+        if (response.status === 404) {
+          if (isOptionalPluginAsset(fileName)) {
+            return null;
+          }
+          saw404 = true;
+          // Stash returns 404 when a required runtime asset is missing; stop early to avoid spam.
+          pluginAssetsUnavailable = true;
+          break;
+        }
         if (!response.ok) {
           continue;
         }
@@ -485,6 +613,9 @@
       } catch (_error) {
         /* try next */
       }
+    }
+    if (saw404) {
+      pluginAssetsUnavailable = true;
     }
     return null;
   }
@@ -502,11 +633,18 @@
     if (rawText && rawText.trim()) {
       return rawText;
     }
-    return null;
+    // Fallback: GraphQL operation (works even if /assets/ is unavailable).
+    try {
+      const payload = await fetchAgentSetupLog();
+      const setupLog = payload && (payload.setup_log || payload.log_text);
+      return typeof setupLog === "string" && setupLog.trim() ? setupLog : null;
+    } catch (_error) {
+      return null;
+    }
   }
 
-  async function fetchPluginAssetJson(fileName) {
-    const text = await fetchPluginAssetText(fileName);
+  async function fetchPluginAssetJson(fileName, options) {
+    const text = await fetchPluginAssetText(fileName, options);
     if (!text) {
       return null;
     }
@@ -518,15 +656,20 @@
     }
   }
 
-  async function fetchMcpPathsHintFromAsset() {
+  async function fetchMcpPathsHintFromAsset(options) {
+    const force = Boolean(options && options.force);
     if (cachedMcpPathsHint) {
       return cachedMcpPathsHint;
+    }
+    if (!force && pluginAssetsUnavailable) {
+      return null;
     }
     const cacheBust = `t=${Date.now()}`;
     const candidates = assetCandidates("mcp_paths.json", cacheBust);
     for (const url of candidates) {
       try {
-        const response = await fetch(url, { cache: "no-store" });
+        const response = await fetch(url, { cache: "no-store", credentials: "same-origin" });
+        noteAssetResponseStatus(response.status, "mcp_paths.json");
         if (!response.ok) {
           continue;
         }
@@ -542,15 +685,41 @@
     return null;
   }
 
+  function finalizeMcpConfigJson(jsonText, general, hints) {
+    const parsed = JSON.parse(jsonText);
+    const stash = parsed.mcpServers && parsed.mcpServers.stash;
+    if (!stash) {
+      return jsonText;
+    }
+    const scriptPath = resolveMcpServerScriptPath(hints || {});
+    if (scriptPath) {
+      stash.args = [scriptPath];
+    }
+    if (hints && hints.python_path) {
+      stash.command = hints.python_path;
+    } else if (general && general.pythonPath) {
+      stash.command = general.pythonPath;
+    }
+    if (!stash.env) {
+      stash.env = {};
+    }
+    stash.env.STASH_GRAPHQL_URL = resolveMcpGraphqlUrl(
+      stash.env.STASH_GRAPHQL_URL || (hints && hints.graphql_url)
+    );
+    const apiKey = (general && general.apiKey) || "";
+    if (apiKey) {
+      stash.env.STASH_API_KEY = apiKey;
+    }
+    return JSON.stringify(parsed, null, 2);
+  }
+
   function buildMcpConfigSnippetFromParts(parts) {
-    const graphqlUrl =
-      (parts && parts.graphql_url) ||
-      `${window.location.origin.replace(/\/$/, "")}/graphql`;
-    const apiKey = (parts && parts.api_key) || "";
-    const scriptPath =
-      (parts && parts.mcp_server_path) ||
-      guessMcpServerPath(parts && parts.general) ||
-      "REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR/stash_mcp_server.py";
+    const scriptPath = resolveMcpServerScriptPath(parts);
+    if (!scriptPath) {
+      return null;
+    }
+    const graphqlUrl = resolveMcpGraphqlUrl(parts && parts.graphql_url);
+    const apiKey = (parts && parts.general && parts.general.apiKey) || "";
     const pythonCmd =
       (parts && parts.python_path) ||
       (parts && parts.general && parts.general.pythonPath) ||
@@ -581,43 +750,46 @@
     }
     mcpConfigInflight = (async () => {
       const general = await fetchStashGeneralConfig();
-      let serverParts = null;
+      const assetHint = await fetchMcpPathsHintFromAsset({ force: true });
+      if (assetHint && assetHint.mcp_config_json) {
+        return finalizeMcpConfigJson(assetHint.mcp_config_json, general, assetHint);
+      }
+
+      let serverParts = assetHint ? { ...assetHint } : null;
       try {
         const hints = await agentPathHints();
         const raw = await runPluginModeOperation(AGENT_MCP_CONFIG_MODE, hints);
-        serverParts = normalizePluginResult(raw);
+        const fromPlugin = normalizePluginResult(raw);
+        if (fromPlugin) {
+          serverParts = { ...(serverParts || {}), ...fromPlugin };
+        }
       } catch (error) {
         console.warn("[Smart Dashboard] Could not load MCP config from plugin", error);
       }
-      if (!serverParts || !serverParts.mcp_config_json) {
-        const assetHint = await fetchMcpPathsHintFromAsset();
-        if (assetHint) {
-          serverParts = {
-            ...(serverParts || {}),
-            mcp_server_path: assetHint.mcp_server_path,
-            python_path: assetHint.python_path,
-            graphql_url: assetHint.graphql_url,
-          };
+      if (!serverParts || !serverParts.mcp_server_path) {
+        try {
+          const installState = await fetchPluginAssetJson("install_state.json");
+          const dbPath =
+            (installState && installState.agent_library_db) ||
+            (installState && installState.index && installState.index.db_path);
+          const derived = deriveMcpServerPathFromDbPath(dbPath);
+          if (derived) {
+            serverParts = { ...(serverParts || {}), mcp_server_path: derived };
+          }
+        } catch (_error) {
+          /* ignore */
         }
       }
-      const apiKey =
-        (serverParts && serverParts.api_key) ||
-        (general && general.apiKey) ||
-        "";
+      const apiKey = (general && general.apiKey) || "";
       if (serverParts && serverParts.mcp_config_json) {
-        const parsed = JSON.parse(serverParts.mcp_config_json);
-        if (general && general.apiKey) {
-          parsed.mcpServers.stash.env.STASH_API_KEY = general.apiKey;
-        } else if (apiKey) {
-          parsed.mcpServers.stash.env.STASH_API_KEY = apiKey;
-        }
-        return JSON.stringify(parsed, null, 2);
+        return finalizeMcpConfigJson(serverParts.mcp_config_json, general, serverParts);
       }
       return buildMcpConfigSnippetFromParts({
         general,
         api_key: apiKey,
         graphql_url: (serverParts && serverParts.graphql_url) || null,
         mcp_server_path: serverParts && serverParts.mcp_server_path,
+        plugin_dir: serverParts && serverParts.plugin_dir,
         python_path: serverParts && serverParts.python_path,
       });
     })().finally(() => {
@@ -891,9 +1063,23 @@
     const timeoutMs = (options && options.timeoutMs) || 6 * 60 * 60 * 1000;
     const onUpdate = options && options.onUpdate;
     const onAssetPoll = options && options.onAssetPoll;
+    const onIndexReady = options && options.onIndexReady;
     const started = Date.now();
     let last = null;
     while (Date.now() - started < timeoutMs) {
+      if (window.smartDashboardMcpSettled) {
+        return { ...(last || {}), status: "FINISHED", index_ready_early: true };
+      }
+      if (onIndexReady) {
+        try {
+          const readyPayload = await onIndexReady();
+          if (readyPayload && indexReadyFromPayload(readyPayload)) {
+            return { ...(last || {}), status: "FINISHED", index_ready_early: true };
+          }
+        } catch (_error) {
+          /* ignore */
+        }
+      }
       if (onAssetPoll) {
         const early = await onAssetPoll();
         if (early && early.indexReady) {
@@ -923,8 +1109,54 @@
   }
 
   function indexReadyFromPayload(payload) {
-    const index = payload && payload.index;
-    return Boolean(index && index.ready && (index.scene_count || 0) > 0);
+    if (!payload || typeof payload !== "object") {
+      return false;
+    }
+    const index = payload.index;
+    if (index && index.ready && Number(index.scene_count || 0) > 0) {
+      return true;
+    }
+    const install = payload.install_state;
+    if (install && install.index_ready && Number(install.index_scene_count || 0) > 0) {
+      return true;
+    }
+    if (payload.index_ready && Number(payload.index_scene_count || 0) > 0) {
+      return true;
+    }
+    return false;
+  }
+
+  function agentDbFilePresent(payload) {
+    if (!payload || typeof payload !== "object") {
+      return false;
+    }
+    const env = payload.environment;
+    if (env && (env.db_exists || Number(env.db_size_bytes) > 0)) {
+      return true;
+    }
+    const install = payload.install_state || payload;
+    if (install.agent_library_db_exists) {
+      return true;
+    }
+    if (Number(install.agent_library_db_size_bytes) > 0) {
+      return true;
+    }
+    if (Array.isArray(install.missing) && !install.missing.includes("agent_library_db")) {
+      return true;
+    }
+    return false;
+  }
+
+  function agentDbSizeBytes(payload) {
+    if (!payload || typeof payload !== "object") {
+      return 0;
+    }
+    const env = payload.environment;
+    if (env && Number(env.db_size_bytes) > 0) {
+      return Number(env.db_size_bytes);
+    }
+    const install = payload.install_state || payload;
+    return Number(install.agent_library_db_size_bytes) || 0;
   }
 
   function parseIndexStatsFromSetupLog(logText) {
@@ -955,9 +1187,28 @@
       localStorage.setItem(MCP_SETUP_KEY, "1");
       sessionStorage.removeItem(MCP_SETUP_AUTOSTART_KEY);
     }
+    if (installState.mcp_deps_ready && installState.index_ready) {
+      localStorage.setItem(MCP_DISK_READY_KEY, "1");
+    }
     if (installState.index_ready) {
       clearIndexAutostartQueued();
     }
+  }
+
+  function installStateImpliesReady(state) {
+    if (!state || typeof state !== "object") {
+      return false;
+    }
+    if (state.index_ready && Number(state.index_scene_count || 0) > 0) {
+      return true;
+    }
+    if (state.recommended_task === "none") {
+      return true;
+    }
+    if (state.mcp_deps_ready && state.index_ready) {
+      return true;
+    }
+    return false;
   }
 
   function payloadFromInstallState(installState) {
@@ -982,11 +1233,36 @@
       };
       payload.setup_status = { state: "success" };
     }
+    if (installState.agent_library_db_exists) {
+      payload.environment = {
+        ...(payload.environment || {}),
+        db_exists: true,
+        db_path: installState.agent_library_db || payload.environment?.db_path,
+        db_size_bytes: Number(installState.agent_library_db_size_bytes) || payload.environment?.db_size_bytes,
+      };
+    }
     return payload.index || payload.environment ? payload : null;
   }
 
   async function probeInstallStateFromAssets() {
-    let installState = await fetchPluginAssetJson("install_state.json");
+    let installState = await fetchPluginAssetJson("install_state.json", { force: true });
+    if (installState) {
+      markMcpInstallCompleteFromState(installState);
+      return installState;
+    }
+    if (pluginAssetsUnavailable) {
+      try {
+        const statePayload = await fetchAgentInstallState();
+        const state = statePayload && (statePayload.install_state || statePayload);
+        if (state) {
+          markMcpInstallCompleteFromState(state);
+        }
+        return state || null;
+      } catch (_error) {
+        return null;
+      }
+    }
+    installState = await fetchPluginAssetJson("install_state.json");
     if (installState) {
       markMcpInstallCompleteFromState(installState);
       return installState;
@@ -1005,10 +1281,29 @@
     if (depsReadyFromPayload(assetPayload)) {
       return { mcp_deps_ready: true, index_ready: false };
     }
+    // Final fallback: GraphQL operation.
+    try {
+      const statePayload = await fetchAgentInstallState();
+      installState = statePayload && (statePayload.install_state || statePayload);
+      if (installState) {
+        markMcpInstallCompleteFromState(installState);
+        return installState;
+      }
+    } catch (_error) {
+      /* ignore */
+    }
     return null;
   }
 
   async function fetchAgentStateFromAssets() {
+    if (pluginAssetsUnavailable) {
+      try {
+        const payload = await fetchAgentSetupLog();
+        return payload && typeof payload === "object" ? payload : null;
+      } catch (_error) {
+        return null;
+      }
+    }
     const [setupLog, setupStatus, scanProgress, uiSnapshot, installState] = await Promise.all([
       fetchSetupLogText(),
       fetchPluginAssetJson("setup_status.json"),
@@ -1065,7 +1360,17 @@
   }
 
   function depsReadyFromPayload(payload) {
-    return agentDepsReady(payload);
+    if (agentDepsReady(payload)) {
+      return true;
+    }
+    const install = payload && payload.install_state;
+    if (install && typeof install === "object" && install.mcp_deps_ready) {
+      return true;
+    }
+    if (payload && payload.mcp_deps_ready) {
+      return true;
+    }
+    return false;
   }
 
   function dashboardDepsReady(stats) {
@@ -1149,25 +1454,52 @@
       return;
     }
     backgroundServicesStarted = true;
+    if (isMcpDashboardRoute()) {
+      return;
+    }
     (async () => {
       const installState = await probeInstallStateFromAssets();
-      if (installState && installState.index_ready) {
+
+      if (installStateImpliesReady(installState)) {
+        markMcpInstallCompleteFromState(installState);
         return;
       }
-      if (!installState || !installState.dashboard_deps_ready) {
+      if (!installState) {
+        return;
+      }
+      if (installState.recommended_task === "none") {
+        return;
+      }
+
+      const recommended = installState.recommended_task;
+      if (recommended === "setup") {
         triggerSetupOnce();
+        return;
       }
-      if (installState && installState.mcp_deps_ready) {
+      if (recommended === "build_agent_index") {
         ensureAgentIndexInBackground().catch((error) => {
           console.warn("[Smart Dashboard] Background agent index build failed to start", error);
         });
         return;
       }
-      startBackgroundAgentSetup().finally(() => {
+      if (recommended === "setup_agent") {
+        startBackgroundAgentSetup().catch((error) => {
+          console.warn("[Smart Dashboard] Background MCP agent setup failed to start", error);
+        });
+        return;
+      }
+
+      if (!installState.dashboard_deps_ready) {
+        triggerSetupOnce();
+      } else if (!installState.mcp_deps_ready) {
+        startBackgroundAgentSetup().catch((error) => {
+          console.warn("[Smart Dashboard] Background MCP agent setup failed to start", error);
+        });
+      } else if (!installState.index_ready) {
         ensureAgentIndexInBackground().catch((error) => {
           console.warn("[Smart Dashboard] Background agent index build failed to start", error);
         });
-      });
+      }
     })().catch((error) => {
       console.warn("[Smart Dashboard] Background services start failed", error);
     });
@@ -1181,6 +1513,9 @@
 
     backgroundAgentIndexInFlight = (async () => {
       const installState = await probeInstallStateFromAssets();
+      if (installStateImpliesReady(installState)) {
+        return { ok: true, ready: true, skipped: true };
+      }
       if (installState && installState.index_ready) {
         return { ok: true, ready: true, skipped: true };
       }
@@ -1258,6 +1593,13 @@
 
     backgroundAgentSetupInFlight = (async () => {
       const installState = await probeInstallStateFromAssets();
+      if (installStateImpliesReady(installState)) {
+        markMcpInstallCompleteFromState(installState);
+        return { ok: true, ready: true, skipped: true, already_installed: true, installState };
+      }
+      if (localStorage.getItem(MCP_DISK_READY_KEY) === "1" && installState && installState.mcp_deps_ready) {
+        return { ok: true, ready: true, skipped: true, already_installed: true, installState };
+      }
       if (installState && installState.index_ready) {
         return { ok: true, ready: true, skipped: true, already_installed: true, installState };
       }
@@ -1324,7 +1666,7 @@
   }
 
   function startBackgroundAgentSetup() {
-    ensureAgentDependenciesInBackground().catch((error) => {
+    return ensureAgentDependenciesInBackground().catch((error) => {
       console.warn("[Smart Dashboard] Background MCP agent setup failed to start", error);
       sessionStorage.removeItem(MCP_SETUP_AUTOSTART_KEY);
     });
@@ -2853,6 +3195,7 @@
 
     function McpAgentPage() {
       const [indexStats, setIndexStats] = React.useState(null);
+      const [mcpInstallState, setMcpInstallState] = React.useState(null);
       const [agentEnvironment, setAgentEnvironment] = React.useState(null);
       const [agentSetupStatus, setAgentSetupStatus] = React.useState(null);
       const [indexScanFailed, setIndexScanFailed] = React.useState(false);
@@ -2905,6 +3248,9 @@
       }, []);
 
       React.useEffect(() => {
+        if (window.smartDashboardMcpSettled) {
+          return undefined;
+        }
         const ready = Boolean(indexStats && indexStats.ready && (indexStats.scene_count || 0) > 0);
         if (ready) {
           return undefined;
@@ -2971,19 +3317,63 @@
       }
 
       function applyAgentPayload(payload) {
-        if (payload && payload.index) {
+        if (!payload) {
+          return;
+        }
+        if (payload.index) {
           setIndexStats(payload.index);
-        } else if (payload && (payload.scene_count !== undefined || payload.ready !== undefined)) {
+        } else if (payload.scene_count !== undefined || payload.ready !== undefined) {
           setIndexStats(payload);
         }
-        if (payload && payload.environment) {
+        if (payload.environment) {
           setAgentEnvironment(payload.environment);
           if (payload.environment.deps && payload.environment.deps.all_ready) {
             localStorage.setItem(MCP_SETUP_KEY, "1");
           }
+          if (
+            payload.environment.db_exists &&
+            !payload.index &&
+            !(payload.install_state && payload.install_state.index_ready)
+          ) {
+            setAgentEnvironment((current) => ({
+              ...(current || {}),
+              ...payload.environment,
+              db_exists: true,
+              db_path: payload.environment.db_path,
+              db_size_bytes: payload.environment.db_size_bytes,
+            }));
+          }
         }
-        if (payload && payload.install_state) {
-          markMcpInstallCompleteFromState(payload.install_state);
+        if (payload.install_state) {
+          const installState = payload.install_state;
+          setMcpInstallState(installState);
+          markMcpInstallCompleteFromState(installState);
+          if (installState.agent_library_db_exists) {
+            setAgentEnvironment((current) => ({
+              ...(current || {}),
+              db_exists: true,
+              db_path: installState.agent_library_db || (current && current.db_path),
+              db_size_bytes:
+                Number(installState.agent_library_db_size_bytes) ||
+                (current && current.db_size_bytes) ||
+                0,
+            }));
+          }
+          if (!indexReadyFromPayload(payload) && installState.index && typeof installState.index === "object") {
+            const idx = installState.index;
+            if (Number(idx.scene_count || 0) > 0 || idx.ready) {
+              setIndexStats(idx);
+            }
+          } else if (!payload.index && installState.index_ready && Number(installState.index_scene_count) > 0) {
+            setIndexStats({
+              ready: true,
+              scene_count: Number(installState.index_scene_count),
+              tag_count: Number(installState.tag_count) || 0,
+              performer_count: Number(installState.performer_count) || 0,
+              studio_count: Number(installState.studio_count) || 0,
+              db_path: installState.agent_library_db,
+            });
+          }
         }
         if (payload && payload.setup_status) {
           setAgentSetupStatus(payload.setup_status);
@@ -3128,6 +3518,7 @@
         if (!indexReadyFromPayload(payload)) {
           return false;
         }
+        window.smartDashboardMcpSettled = true;
         setSetupBusy(false);
         setScanBusy(false);
         setIndexJobActive(false);
@@ -3135,6 +3526,36 @@
         sessionStorage.removeItem(MCP_SETUP_AUTOSTART_KEY);
         patchMcpActivity({ phase: "idle", label: "", progress: null, jobId: null });
         return true;
+      }
+
+      async function refreshMcpStatusFromServer() {
+        let installState = null;
+        try {
+          const raw = await fetchAgentInstallState();
+          installState = (raw && raw.install_state) || raw;
+        } catch (error) {
+          console.warn("[Smart Dashboard] agent_install_state failed", error);
+        }
+        if (installState) {
+          markMcpInstallCompleteFromState(installState);
+          const fromState = payloadFromInstallState(installState) || { install_state: installState };
+          applyAgentPayload({ ...fromState, install_state: installState });
+          if (installStateImpliesReady(installState)) {
+            return fromState;
+          }
+        }
+        try {
+          const statsPayload = await fetchAgentIndexStats({ full: true });
+          if (statsPayload) {
+            applyAgentPayload(statsPayload);
+            if (indexReadyFromPayload(statsPayload)) {
+              return statsPayload;
+            }
+          }
+        } catch (error) {
+          console.warn("[Smart Dashboard] agent_index_stats failed", error);
+        }
+        return installState ? { install_state: installState, ...(payloadFromInstallState(installState) || {}) } : null;
       }
 
       async function runTrackedMcpTask(mode, description, kind) {
@@ -3339,8 +3760,23 @@
           if (installState && installState.mcp_deps_ready) {
             localStorage.setItem(MCP_SETUP_KEY, "1");
             const latest = await syncAgentStateFromAssets();
+            applyAgentPayload(
+              latest || { install_state: installState, ...(payloadFromInstallState(installState) || {}) }
+            );
+            if (indexReadyFromPayload(latest) || installState.index_ready) {
+              settleMcpUiIfReady(latest || { install_state: installState });
+              patchMcpActivity({ phase: "idle", label: "", progress: null, jobId: null });
+              return { ok: true, skipped: true, latest, already_installed: true };
+            }
             if (!indexReadyFromPayload(latest)) {
               await ensureAgentIndexInBackground();
+              await resumeTrackedJobsIfAny();
+              patchMcpActivity({
+                phase: "scan",
+                label: "Index fehlt – bereit für Bibliotheks-Scan.",
+                progress: null,
+                jobId: null,
+              });
             }
             return { ok: true, skipped: true, latest, deps_only: true };
           }
@@ -3368,7 +3804,19 @@
               });
             }
           );
-          const ready = depsReadyFromPayload(waited) || setupSucceededFromPayload(waited);
+          let ready = depsReadyFromPayload(waited) || setupSucceededFromPayload(waited);
+          if (!ready) {
+            const probe = await probeInstallStateFromAssets();
+            if (installStateImpliesReady(probe)) {
+              ready = true;
+              waited = {
+                install_state: probe,
+                ...(payloadFromInstallState(probe) || {}),
+              };
+              applyAgentPayload(waited);
+              settleMcpUiIfReady(waited);
+            }
+          }
           patchMcpActivity({
             phase: "idle",
             label: ready ? t("mcpAgent.activitySetupDone") : t("mcpAgent.activitySetupFailed"),
@@ -3383,8 +3831,22 @@
 
       async function resumeTrackedJobsIfAny() {
         try {
+          if (window.smartDashboardMcpSettled) {
+            return;
+          }
+          const installProbe = await probeInstallStateFromAssets();
+          if (installStateImpliesReady(installProbe)) {
+            const readyPayload = {
+              install_state: installProbe,
+              ...(payloadFromInstallState(installProbe) || {}),
+            };
+            applyAgentPayload(readyPayload);
+            settleMcpUiIfReady(readyPayload);
+            return;
+          }
           let latestCheck = await syncAgentStateFromAssets();
           if (indexReadyFromPayload(latestCheck)) {
+            settleMcpUiIfReady(latestCheck);
             return;
           }
           if (!latestCheck) {
@@ -3447,6 +3909,8 @@
             refreshSetupLogDisplay().catch(() => {});
           }, MCP_LOG_POLL_MS);
           const finished = await pollStashJobUntilDone(job.id, {
+            intervalMs: 3000,
+            timeoutMs: 30 * 60 * 1000,
             onUpdate: (liveJob) => {
               patchMcpActivity({
                 phase: kind,
@@ -3455,6 +3919,7 @@
                 jobId: job.id,
               });
             },
+            onIndexReady: () => refreshMcpStatusFromServer(),
             onAssetPoll: async () => {
               const assetPayload = await syncAgentStateFromAssets();
               if (indexReadyFromPayload(assetPayload)) {
@@ -3513,6 +3978,9 @@
       }
 
       React.useEffect(() => {
+        if (!SHOW_MCP_CHAT_LOG_PANEL) {
+          return undefined;
+        }
         let cancelled = false;
         async function pollSetupLog() {
           if (cancelled) {
@@ -3531,53 +3999,39 @@
       React.useEffect(() => {
         let cancelled = false;
         async function bootstrap() {
+          window.smartDashboardMcpSettled = false;
           setMessages([{ role: "assistant", text: t("mcpAgent.welcome") }]);
-          await probeInstallStateFromAssets();
-          let latest = await syncAgentStateFromAssets();
+          const installProbe = await probeInstallStateFromAssets();
+          if (installStateImpliesReady(installProbe)) {
+            const readyPayload = {
+              install_state: installProbe,
+              ...(payloadFromInstallState(installProbe) || {}),
+            };
+            applyAgentPayload(readyPayload);
+            settleMcpUiIfReady(readyPayload);
+            if (!cancelled) {
+              setStatusLoading(false);
+            }
+            return;
+          }
+          let latest = await refreshMcpStatusFromServer();
           if (!cancelled) {
             setStatusLoading(false);
           }
-          if (indexReadyFromPayload(latest)) {
-            settleMcpUiIfReady(latest);
-            return;
-          }
-          if (!latest) {
-            try {
-              latest = await fetchAgentDepsCheck();
-              applyAgentPayload(latest);
-              settleMcpUiIfReady(latest);
-            } catch (error) {
-              console.warn("[Smart Dashboard] Initial deps check failed", error);
-            }
-          }
-          if (!cancelled && !indexReadyFromPayload(latest)) {
-            if (depsReadyFromPayload(latest)) {
-              await refreshIndexStats({ full: true });
-            } else {
-              await refreshIndexStats({ full: false });
-            }
-            latest = (await syncAgentStateFromAssets()) || latest;
-          }
           if (cancelled) {
             return;
           }
-          if (depsReadyFromPayload(latest) && !indexReadyFromPayload(latest)) {
+          if (indexReadyFromPayload(latest) || installStateImpliesReady(latest && latest.install_state)) {
+            settleMcpUiIfReady(latest);
+            patchMcpActivity({ phase: "idle", label: "", progress: null, jobId: null });
+            return;
+          }
+          if (depsReadyFromPayload(latest)) {
             localStorage.setItem(MCP_SETUP_KEY, "1");
           }
-          if (indexReadyFromPayload(latest)) {
-            settleMcpUiIfReady(latest);
-          } else {
-            resumeTrackedJobsIfAny().catch((error) => {
-              console.warn("[Smart Dashboard] Could not resume MCP jobs", error);
-            });
-          }
-          if (cancelled) {
-            return;
-          }
-          if (!latest) {
-            latest = await fetchAgentDepsCheck();
-            applyAgentPayload(latest);
-          }
+          resumeTrackedJobsIfAny().catch((error) => {
+            console.warn("[Smart Dashboard] Could not resume MCP jobs", error);
+          });
           if (cancelled) {
             return;
           }
@@ -3585,10 +4039,21 @@
           const indexJobRunning = jobsAfterResume.some(
             (job) => isActiveStashJob(job) && (isAgentIndexBuildJob(job) || isMcpAgentSetupJob(job))
           );
-          if (!indexJobRunning && !indexReadyFromPayload(latest)) {
+          if (
+            !indexJobRunning &&
+            !indexReadyFromPayload(latest) &&
+            !installStateImpliesReady(installProbe) &&
+            !window.smartDashboardMcpSettled
+          ) {
             await maybeStartAutoScan(latest);
           }
-          let depsReadyFlag = depsReadyFromPayload(latest) || indexReadyFromPayload(latest);
+          if (cancelled || window.smartDashboardMcpSettled) {
+            return;
+          }
+          let depsReadyFlag =
+            depsReadyFromPayload(latest) ||
+            indexReadyFromPayload(latest) ||
+            installStateImpliesReady(installProbe);
           if (!depsReadyFlag) {
             patchMcpActivity({
               phase: "setup",
@@ -3643,8 +4108,12 @@
       }, []);
 
       async function maybeStartAutoScan(latest) {
-        if (!depsReadyFromPayload(latest) || indexReadyFromPayload(latest)) {
-          return { started: false, reason: "not_needed" };
+        const diskState = await probeInstallStateFromAssets();
+        if (installStateImpliesReady(diskState) || indexReadyFromPayload(latest)) {
+          return { started: false, reason: "already_ready" };
+        }
+        if (!depsReadyFromPayload(latest)) {
+          return { started: false, reason: "deps_missing" };
         }
         const jobs = await fetchStashJobQueue();
         if (jobs.some((job) => isActiveStashJob(job) && isAgentIndexBuildJob(job))) {
@@ -3733,13 +4202,17 @@
 
       const stats = indexStats || {};
       const env = agentEnvironment || {};
-      const indexReady = Boolean(stats.ready && stats.scene_count > 0);
+      const uiPayload = { index: stats, environment: env, install_state: mcpInstallState };
+      const indexReady = indexReadyFromPayload(uiPayload);
       const deps = env.deps || {};
       const depsReady =
         Boolean(deps.all_ready) ||
+        Boolean(mcpInstallState && mcpInstallState.mcp_deps_ready) ||
         Boolean(agentSetupStatus && agentSetupStatus.state === "success") ||
         localStorage.getItem(MCP_SETUP_KEY) === "1";
-      const dbExists = Boolean(env.db_exists);
+      const dbFilePresent = agentDbFilePresent(uiPayload);
+      const dbExists = dbFilePresent;
+      const dbSizeBytes = agentDbSizeBytes(uiPayload) || Number(env.db_size_bytes) || 0;
       const stashSqlite = env.stash_sqlite || {};
       const stashSqliteReady = Boolean(stashSqlite.readable && stashSqlite.scene_count > 0);
       const indexSource = stats.index_source || env.index_source || "";
@@ -3764,13 +4237,21 @@
           indexJobActive ||
           Boolean(mcpActivity.phase === "setup" || mcpActivity.phase === "scan") ||
           Boolean(scanProgress && scanProgress.phase) ||
-          (!setupComplete && !statusLoading));
-      const showMainSetupBanner = !statusLoading && !indexReady && (setupWorking || setupError);
-      const showActivity = setupWorking || setupError || Boolean(mcpActivity.label);
+          false);
+      const setupPending =
+        !statusLoading &&
+        !indexReady &&
+        depsReady &&
+        !setupWorking &&
+        !setupError &&
+        (!scanProgress || scanProgressStale);
+      const showMainSetupBanner = !statusLoading && !indexReady && (setupWorking || setupError || setupPending);
+      const showActivity = setupWorking || setupError || setupPending || Boolean(mcpActivity.label);
       const bannerPercent = estimateMcpSetupPercent({
         depsReady,
         setupOk,
         indexReady,
+        dbExists,
         scanBusy: scanBusy || indexJobActive,
         setupBusy,
         stats: { ...stats, scene_count: progressScenes },
@@ -3798,9 +4279,7 @@
       const bannerLiveLines = getSetupLogTailLines(setupLogText, 5);
       const bannerVariant = setupError ? "error" : setupWorking ? "working" : "pending";
       const dbSizeLabel =
-        env.db_size_bytes
-          ? t("mcpAgent.statusDbSize", { size: formatFileSize(env.db_size_bytes) })
-          : null;
+        dbSizeBytes > 0 ? t("mcpAgent.statusDbSize", { size: formatFileSize(dbSizeBytes) }) : null;
       const dbDateLabel =
         stats.generated_at ? t("mcpAgent.statusDbDate", { date: formatDate(stats.generated_at) }) : null;
 
@@ -3844,7 +4323,8 @@
       const setupState = mcpStepState(setupOk, setupFailed);
       const stashFailed = Boolean(stashSqlite.path && !stashSqlite.readable && stashSqlite.error);
       const stashState = mcpStepState(stashSqliteReady, stashFailed);
-      const indexState = mcpStepState(indexReady && dbExists, indexScanFailed && !indexReady);
+      const indexState = mcpStepState(indexReady, indexScanFailed && !indexReady && !dbFilePresent);
+      const dbRowState = mcpStepState(dbFilePresent, false);
 
       function renderBannerStep(label, state) {
         const step = state === "ok" || state === "failed" ? state : "pending";
@@ -4066,21 +4546,27 @@
                     ),
                     renderStatusRow(
                       t("mcpAgent.statusDb"),
-                      indexState,
-                      indexState === "ok"
+                      indexReady ? indexState : dbRowState,
+                      indexReady
                         ? [
-                            t("mcpAgent.statusDbOk", { count: stats.scene_count || 0 }),
+                            t("mcpAgent.statusDbOk", {
+                              count: stats.scene_count || mcpInstallState?.index_scene_count || 0,
+                            }),
                             indexSource === "stash_sqlite" ? t("mcpAgent.indexSourceSqlite") : null,
                             dbSizeLabel,
                             dbDateLabel,
                           ]
                             .filter(Boolean)
                             .join(" · ")
-                        : indexState === "failed"
-                          ? t("mcpAgent.statusDbFailed")
-                          : scanBusy
-                            ? t("mcpAgent.activityScanRunning")
-                            : t("mcpAgent.statusDbEmpty")
+                        : dbFilePresent
+                          ? t("mcpAgent.statusDbFilePresent", {
+                              size: dbSizeBytes > 0 ? formatFileSize(dbSizeBytes) : "?",
+                            })
+                          : indexState === "failed"
+                            ? t("mcpAgent.statusDbFailed")
+                            : scanBusy
+                              ? t("mcpAgent.activityScanRunning")
+                              : t("mcpAgent.statusDbEmpty")
                     )
                   )
             ),
@@ -4243,48 +4729,50 @@
                   )
                 )
               : null,
-            h(
-              "div",
-              { className: "sd-mcp-log-panel sd-mcp-log-panel-below-chat" },
-              h(
-                "div",
-                { className: "sd-mcp-log-header" },
-                h("h3", { className: "sd-mcp-status-title" }, t("mcpAgent.logTitle")),
-                h(
-                  "button",
-                  {
-                    className: "sd-task-button sd-task-button-secondary sd-mcp-log-copy",
-                    type: "button",
-                    onClick: () => refreshSetupLogDisplay(),
-                  },
-                  t("mcpAgent.logRefresh")
-                ),
-                h(
-                  "button",
-                  {
-                    className: "sd-task-button sd-task-button-secondary sd-mcp-log-copy",
-                    type: "button",
-                    disabled: !setupLogText,
-                    onClick: async () => {
-                      const ok = await copyTextToClipboard(setupLogText);
-                      setLogCopyStatus(ok ? t("mcpAgent.logCopyDone") : t("mcpAgent.logCopyFailed"));
-                      window.setTimeout(() => setLogCopyStatus(""), 4000);
+            SHOW_MCP_CHAT_LOG_PANEL
+              ? h(
+                  "div",
+                  { className: "sd-mcp-log-panel sd-mcp-log-panel-below-chat" },
+                  h(
+                    "div",
+                    { className: "sd-mcp-log-header" },
+                    h("h3", { className: "sd-mcp-status-title" }, t("mcpAgent.logTitle")),
+                    h(
+                      "button",
+                      {
+                        className: "sd-task-button sd-task-button-secondary sd-mcp-log-copy",
+                        type: "button",
+                        onClick: () => refreshSetupLogDisplay(),
+                      },
+                      t("mcpAgent.logRefresh")
+                    ),
+                    h(
+                      "button",
+                      {
+                        className: "sd-task-button sd-task-button-secondary sd-mcp-log-copy",
+                        type: "button",
+                        disabled: !setupLogText,
+                        onClick: async () => {
+                          const ok = await copyTextToClipboard(setupLogText);
+                          setLogCopyStatus(ok ? t("mcpAgent.logCopyDone") : t("mcpAgent.logCopyFailed"));
+                          window.setTimeout(() => setLogCopyStatus(""), 4000);
+                        },
+                      },
+                      t("mcpAgent.logCopy")
+                    )
+                  ),
+                  logCopyStatus ? h("p", { className: "sd-mcp-copy-status" }, logCopyStatus) : null,
+                  h(
+                    "pre",
+                    {
+                      className: "sd-mcp-log-pre",
+                      ref: setupLogPreRef,
+                      "aria-label": t("mcpAgent.logTitle"),
                     },
-                  },
-                  t("mcpAgent.logCopy")
+                    formatSetupLogDisplay(setupLogText, mcpActivity) || t("mcpAgent.logEmpty")
+                  )
                 )
-              ),
-              logCopyStatus ? h("p", { className: "sd-mcp-copy-status" }, logCopyStatus) : null,
-              h(
-                "pre",
-                {
-                  className: "sd-mcp-log-pre",
-                  ref: setupLogPreRef,
-                  "aria-label": t("mcpAgent.logTitle"),
-                },
-                formatSetupLogDisplay(setupLogText, mcpActivity) || t("mcpAgent.logEmpty")
-              )
-            )
+              : null
           )
         )
       );

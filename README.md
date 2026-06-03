@@ -468,7 +468,7 @@ The plugin creates local files in its own plugin directory:
   Last lines of `setup_log.txt` for the MCP UI log panel (updated while tasks run).
 
 - `mcp_paths.json` / `agent_ui_snapshot.json`  
-  Runtime hints for MCP config paths and UI status when `runPluginOperation` is blocked by another task.
+  Runtime hints for MCP config paths and UI status when `runPluginOperation` is blocked by another task. **Not committed to git** — no API keys are written to `mcp_paths.json` (keys are injected in the browser from Stash Settings).
 
 These files are generated locally and are not sent to any external service.
 
@@ -506,7 +506,7 @@ Connect AI assistants (Cursor, Claude Desktop, OpenClaw, Windsurf, Cline, …) t
 2. **No terminal required:** on first install, a background task installs MCP dependencies into `vendor/`. After that, **Reload Plugins** does not reinstall if `vendor/` and `agent_library.db` are already present.
 3. The MCP UI can start a **library scan** automatically (or use **Scan full library**) to build `agent_library.db` when the index is missing.
 4. Use the built-in **chat** for quick queries against the local index (stats, tags, titles, scene IDs).
-5. Use **Connect your AI agent** in the sidebar to copy an MCP JSON config.
+5. Use **MCP-Config kopieren** / **Copy MCP config** — the JSON is built automatically from **your** Stash instance (plugin path, GraphQL URL from the browser, API key from **Settings → Security**). Nothing is hardcoded for a specific user or server.
 
 The in-Stash chat uses the local index only (no external LLM). For full AI conversations, connect an external agent below.
 
@@ -532,10 +532,19 @@ End users do **not** need to run `pip` manually. Admins can check **Settings →
 | `mcp-config.cursor.json` | Template for Cursor |
 | `mcp-config.claude-desktop.json` | Template for Claude Desktop |
 | `mcp-config.openclaw.json` | Template for OpenClaw |
+| `mcp_paths.json.example` | Example shape of runtime `mcp_paths.json` (generated on your server) |
 
 #### Universal MCP configuration
 
-Replace `REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR` with your plugin folder path.
+**Recommended:** copy the live config from **MCP-Server → Copy MCP config** (always correct for that Stash install).
+
+Manual templates (`mcp-config.*.json`) use placeholders only — replace all three before use:
+
+| Placeholder | Source |
+|-------------|--------|
+| `REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR` | **Settings → System → Plugin path** + `/community/smart-dashboard/` or `/local/smart-dashboard/` |
+| `REPLACE_WITH_STASH_GRAPHQL_URL` | Your Stash URL + `/graphql` (e.g. `http://192.168.1.10:9999/graphql`) |
+| `REPLACE_WITH_STASH_API_KEY` | **Settings → Security** (leave empty if you do not use an API key) |
 
 ```json
 {
@@ -546,15 +555,13 @@ Replace `REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR` with your plugin folder path.
         "REPLACE_WITH_ABSOLUTE_PATH_TO_PLUGIN_DIR/stash_mcp_server.py"
       ],
       "env": {
-        "STASH_GRAPHQL_URL": "http://localhost:9999/graphql",
-        "STASH_API_KEY": ""
+        "STASH_GRAPHQL_URL": "REPLACE_WITH_STASH_GRAPHQL_URL",
+        "STASH_API_KEY": "REPLACE_WITH_STASH_API_KEY"
       }
     }
   }
 }
 ```
-
-If Stash uses an API key (*Settings → Security*), set `STASH_API_KEY`. Otherwise leave it empty.
 
 #### Connect Cursor
 
