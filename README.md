@@ -87,6 +87,7 @@ All tools are invoked by the AI client as **`stash_*`** MCP tools (not shell com
 
 | MCP tool | What it does | Typical use |
 |----------|----------------|-------------|
+| `stash_list_mcp_tools` | Lists all **`stash_*`** tools; clarifies **`agent_library.db` is not a command registry** | Agents/OpenClaw looking for “commands in the DB” |
 | `stash_agent_library_overview` | Scene/tag/performer/studio counts and samples from **`agent_library.db`** | First check: is the index ready? |
 | `stash_agent_chat` | Natural-language search on the **local index** (fast) | *“Find forgotten high-rated outdoor scenes”* |
 | `stash_agent_search_index` | Direct text search on the index (title, path, tags, performers, studio) | Precise keyword search |

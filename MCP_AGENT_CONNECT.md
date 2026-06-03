@@ -13,12 +13,17 @@ Die **vollständige Dokumentation** liegt in der [README.md](README.md):
 4. **MCP-Config kopieren** und in Cursor / Claude / OpenClaw einfügen  
 5. KI-Client neu starten  
 
+**OpenClaw auf anderem Gerät:** Ordner `smart-dashboard` mit `stash_mcp_server.py` + `stash_agent/` ins Workspace legen.
+
+**Häufiger Irrtum:** `agent_library.db` enthält **Szenen/Tags** (Suchindex), **keine** MCP-Commands. Tools heißen `stash_*` und kommen vom MCP-Server — zuerst **`stash_list_mcp_tools`** aufrufen. Wenn der Index leer ist: `stash_rebuild_agent_index` oder `agent_library.db` vom Stash-Server kopieren. `requirements-agent.txt` ist **nicht** nötig — fehlende Pakete installiert `stash_mcp_server.py` beim ersten Start nach `vendor/`. GraphQL-URL muss die **Stash-Server-IP** sein (nicht `localhost` auf dem OpenClaw-PC).  
+
 Terminal nur bei fehlgeschlagenen Stash-Tasks — siehe README-Befehle unter *Quick start*.
 
 ## Was die KI für dich tun kann (MCP)
 
 | Deine Frage | MCP-Tool |
 |-------------|----------|
+| Welche Befehle gibt es? / Was kann die KI? | **`stash_list_mcp_tools`** (nicht in `agent_library.db` nachschauen!) |
 | Wie groß ist die Bibliothek? | `stash_agent_library_overview`, `stash_get_library_stats` |
 | Szenen suchen / zusammenfassen | `stash_agent_chat`, `stash_agent_search_index`, `stash_search_scenes` |
 | Eine Szene anzeigen | `stash_get_scene` |

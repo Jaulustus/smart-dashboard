@@ -16,47 +16,196 @@ Configure in Cursor / OpenClaw / Claude Desktop, e.g.:
     }
   }
 
-Install agent deps once:
-  python -m pip install -r requirements-agent.txt
+On first run, missing packages are installed into vendor/ next to this file (no
+requirements-agent.txt needed for Cursor / OpenClaw). Set STASH_MCP_SKIP_AUTO_INSTALL=1
+to disable. The Stash plugin task still uses requirements-agent.txt when present.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence, Tuple
+
+# Same pins as requirements-agent.txt (kept in sync for Stash plugin pip tasks).
+AGENT_REQUIREMENTS: Tuple[str, ...] = (
+    "requests>=2.28.0",
+    "mcp>=1.2.0",
+)
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _VENDOR_DIR = _PLUGIN_DIR / "vendor"
-if _VENDOR_DIR.is_dir():
-    vendor = str(_VENDOR_DIR.resolve())
-    if vendor not in sys.path:
-        sys.path.insert(0, vendor)
-if str(_PLUGIN_DIR) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_DIR))
 
-try:
-    from mcp.server.fastmcp import FastMCP
-except ImportError:
+
+def _vendor_on_path() -> None:
+    if _VENDOR_DIR.is_dir():
+        vendor = str(_VENDOR_DIR.resolve())
+        if vendor not in sys.path:
+            sys.path.insert(0, vendor)
+    if str(_PLUGIN_DIR) not in sys.path:
+        sys.path.insert(0, str(_PLUGIN_DIR))
+
+
+def _agent_imports_ready() -> bool:
+    try:
+        import requests  # noqa: F401
+        from mcp.server.fastmcp import FastMCP  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _pip_install_agent_requirements() -> None:
+    _VENDOR_DIR.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        *AGENT_REQUIREMENTS,
+        "-t",
+        str(_VENDOR_DIR),
+        "--no-warn-script-location",
+    ]
     print(
-        "Missing dependency 'mcp'. Install with:\n"
-        "  python -m pip install -r requirements-agent.txt",
+        "[stash-mcp] Installing agent dependencies into vendor/ …",
         file=sys.stderr,
+        flush=True,
     )
-    raise
+    result = subprocess.run(
+        command,
+        cwd=str(_PLUGIN_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, file=sys.stderr, end="")
+    if result.returncode != 0:
+        hint = " ".join(AGENT_REQUIREMENTS)
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(
+            f"pip install failed (exit {result.returncode}). "
+            f"Try: {sys.executable} -m pip install {hint}\n{stderr}"
+        )
+
+
+def ensure_agent_dependencies() -> None:
+    _vendor_on_path()
+    if _agent_imports_ready():
+        return
+    if os.environ.get("STASH_MCP_SKIP_AUTO_INSTALL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        raise ImportError(
+            "Missing MCP agent dependencies. Install with:\n"
+            f"  {sys.executable} -m pip install {' '.join(AGENT_REQUIREMENTS)}"
+        )
+    _pip_install_agent_requirements()
+    _vendor_on_path()
+    if not _agent_imports_ready():
+        raise ImportError(
+            "Dependencies still missing after pip install into vendor/. "
+            f"Packages: {', '.join(AGENT_REQUIREMENTS)}"
+        )
+
+
+ensure_agent_dependencies()
+
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from stash_agent.service import StashAgentService
 
+# MCP tools are registered here (stdio protocol), NOT stored inside agent_library.db.
+MCP_TOOL_CATALOG: Tuple[Dict[str, Any], ...] = (
+    {
+        "name": "stash_list_mcp_tools",
+        "summary": "List every Stash MCP tool and explain agent_library.db (call this first if confused).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_get_library_stats",
+        "summary": "Live scene count and Stash base URL (GraphQL).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_agent_library_overview",
+        "summary": "Index stats/samples from agent_library.db (scenes/tags — not commands).",
+        "uses_agent_library_db": True,
+    },
+    {
+        "name": "stash_rebuild_agent_index",
+        "summary": "Rebuild agent_library.db from Stash (full library scan).",
+        "uses_agent_library_db": True,
+    },
+    {
+        "name": "stash_agent_search_index",
+        "summary": "Fast text search in agent_library.db.",
+        "uses_agent_library_db": True,
+    },
+    {
+        "name": "stash_agent_chat",
+        "summary": "Natural-language Q&A using agent_library.db.",
+        "uses_agent_library_db": True,
+    },
+    {
+        "name": "stash_search_scenes",
+        "summary": "Search scenes via live Stash GraphQL.",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_get_scene",
+        "summary": "Load one scene by ID (GraphQL).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_update_scene",
+        "summary": "Edit scene metadata (GraphQL).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_search_tags",
+        "summary": "Search tags (GraphQL).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_search_performers",
+        "summary": "Search performers (GraphQL).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_search_studios",
+        "summary": "Search studios (GraphQL).",
+        "uses_agent_library_db": False,
+    },
+    {
+        "name": "stash_list_duplicate_groups",
+        "summary": "Read duplicate report JSON (after Cinematic duplicate scan).",
+        "uses_agent_library_db": False,
+    },
+)
+
+MCP_SERVER_INSTRUCTIONS = (
+    "You are connected to the Stash MCP server (tools prefixed stash_). "
+    "IMPORTANT: agent_library.db is ONLY a local search index of scenes/tags/performers — "
+    "it does NOT contain MCP commands or shell commands. "
+    "To see available actions, call stash_list_mcp_tools (or use your client's MCP tool list). "
+    "If the index is empty/missing, call stash_rebuild_agent_index or copy agent_library.db "
+    "from the Stash server. "
+    "For live edits use stash_search_scenes / stash_get_scene / stash_update_scene (GraphQL). "
+    "For fast local search use stash_agent_search_index or stash_agent_chat. "
+    "Prefer tag_mode/performer_mode 'add' when extending metadata."
+)
+
 mcp = FastMCP(
     "stash",
-    instructions=(
-        "Stash media library agent with a local cinematic index (agent_library.db). "
-        "Call stash_rebuild_agent_index after library changes. Use stash_agent_chat for "
-        "natural-language queries against the local index, or stash_agent_search_index for direct search. "
-        "Use stash_search_scenes / stash_get_scene / stash_update_scene for live GraphQL edits. "
-        "Prefer tag_mode/performer_mode 'add' when extending metadata."
-    ),
+    instructions=MCP_SERVER_INSTRUCTIONS,
 )
 
 _service: Optional[StashAgentService] = None
@@ -71,6 +220,43 @@ def service() -> StashAgentService:
 
 def _json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _agent_index_context() -> Dict[str, Any]:
+    stats = service().get_agent_index_stats()
+    ready = bool(stats.get("ready") and int(stats.get("scene_count") or 0) > 0)
+    return {
+        "agent_library_db_path": str(service().config.agent_index_db),
+        "index_ready": ready,
+        "index_stats": stats,
+    }
+
+
+@mcp.tool()
+def stash_list_mcp_tools() -> str:
+    """List all Stash MCP tools. agent_library.db holds scene metadata only — NOT commands."""
+    ctx = _agent_index_context()
+    return _json(
+        {
+            "agent_library_db_is_not_commands": True,
+            "explanation": (
+                "agent_library.db is a SQLite index (tables: scenes, tags, performers, studios). "
+                "MCP commands are separate tools exposed by this server (stash_*). "
+                "OpenClaw/Cursor discover them via the MCP protocol, not by reading the database."
+            ),
+            "if_index_empty": (
+                "Call stash_rebuild_agent_index (needs STASH_GRAPHQL_URL), or copy agent_library.db "
+                "from the machine where Stash ran the library scan."
+            ),
+            "recommended_first_calls": [
+                "stash_list_mcp_tools",
+                "stash_agent_library_overview",
+                "stash_get_library_stats",
+            ],
+            "tools": list(MCP_TOOL_CATALOG),
+            **ctx,
+        }
+    )
 
 
 @mcp.tool()
@@ -198,7 +384,20 @@ def stash_rebuild_agent_index() -> str:
 @mcp.tool()
 def stash_agent_library_overview() -> str:
     """Return stats and samples from the local agent index (scene/tag/performer/studio counts)."""
-    return _json(service().get_agent_index_stats())
+    ctx = _agent_index_context()
+    payload: Dict[str, Any] = {
+        "note": (
+            "This reports library content in agent_library.db, not available MCP tools. "
+            "For commands, call stash_list_mcp_tools."
+        ),
+        **ctx,
+    }
+    if not ctx["index_ready"]:
+        payload["hint"] = (
+            "Index missing or empty on this machine. Run stash_rebuild_agent_index or copy "
+            "agent_library.db from your Stash plugin folder."
+        )
+    return _json(payload)
 
 
 @mcp.tool()
@@ -211,7 +410,13 @@ def stash_agent_search_index(query: str = "", limit: int = 12) -> str:
 @mcp.tool()
 def stash_agent_chat(message: str, limit: int = 12) -> str:
     """Chat with the local Stash agent (searches agent_library.db). Rebuild the index if results are stale."""
-    return _json(service().agent_chat(message, limit=limit))
+    result = service().agent_chat(message, limit=limit)
+    if not _agent_index_context()["index_ready"]:
+        result = {
+            **result,
+            "warning": "agent_library.db not ready — call stash_rebuild_agent_index or stash_list_mcp_tools.",
+        }
+    return _json(result)
 
 
 def main() -> None:
